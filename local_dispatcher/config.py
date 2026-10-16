@@ -79,7 +79,7 @@ class WorkerConfig:
         "mcp__mycelium__context", "mcp__mycelium__recent",
     ])
     output_format: str = "stream-json"   # fallback: "json"
-    prompt_via: str = "argv"             # "argv" (positional prompt) or "stdin"
+    prompt_via: str = "stdin"            # "argv" (positional prompt) or "stdin"
     max_context_pct: float = 0.90
     max_output_tokens: int = 32000
     autocompact_pct: int = 70

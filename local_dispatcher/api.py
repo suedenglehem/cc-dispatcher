@@ -190,9 +190,11 @@ class ApiServer:
             jobs.append(d)
         reservations = {
             "active": [dict(x) for x in conn.execute(
-                "SELECT * FROM reservations WHERE status='active' ORDER BY id")],
+                "SELECT * FROM reservations WHERE status='active' "
+                "ORDER BY acquired_at, attempt_id")],
             "quarantined": [dict(x) for x in conn.execute(
-                "SELECT * FROM reservations WHERE status='quarantined' ORDER BY id")],
+                "SELECT * FROM reservations WHERE status='quarantined' "
+                "ORDER BY acquired_at, attempt_id")],
         }
         sv = conn.execute("SELECT MAX(v) AS v FROM schema_version").fetchone()["v"]
         return {
@@ -320,7 +322,8 @@ class ApiServer:
         limit = max(1, min(int(p.get("limit", 50)), 500))
         subject_type = p.get("subject_type") or None
         subject_id = p.get("subject_id") or None
-        sql = "SELECT id, ts, subject_type, subject_id, event, detail FROM events"
+        sql = ("SELECT id, ts, subject_type, subject_id, event, "
+               "detail_json AS detail FROM events")
         args: list = []
         where = []
         if subject_type:

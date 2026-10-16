@@ -65,12 +65,14 @@ def _row(row: dict) -> str:
     keep = ("id", "status", "state", "objective", "model", "backend_id",
             "profile_id", "failure_class", "event", "endpoint", "health",
             "detail", "code", "message")
-    parts = [f"{k}={_scalar(row[k])}" for k in keep if k in row]
+    parts = [f"{k}={_scalar(row[k])}" for k in keep
+             if k in row and row[k] is not None]
     if "ts" in row:
         parts.insert(0, f"[{row['ts']}]")
     if not parts and row:
-        parts = [f"{k}={_scalar(v)}" for k, v in list(row.items())[:4]]
-    return "  ".join(p for p in parts if p != f"{k}=-") or json.dumps(row)
+        parts = [f"{k}={_scalar(v)}"
+                 for k, v in list(row.items())[:4] if v is not None]
+    return "  ".join(parts) or json.dumps(row)
 
 
 # -- commands -------------------------------------------------------------------
