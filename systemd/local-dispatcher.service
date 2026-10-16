@@ -1,0 +1,23 @@
+[Unit]
+Description=Local Coding Agent Dispatcher (dispatcherd)
+Documentation=file:///dd2/andrei/claude/dispatcher/docs/setup.md
+After=network.target
+
+[Service]
+Type=simple
+# The venv lives with the repo; install.sh rewrites this line if the repo
+# moves. `local-dispatcher` is the installed console script (dispatcherd).
+ExecStart=/dd2/andrei/claude/dispatcher/.venv/bin/local-dispatcher
+# SIGTERM: stop scheduler + API, leave workers running (they are
+# re-adopted on next start). `ladd cancel` is the hard stop.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# The daemon binds a Unix socket under the user's state dir and holds a
+# flock; a stale socket is unlinked on start.
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target

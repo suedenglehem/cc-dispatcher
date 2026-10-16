@@ -1,0 +1,111 @@
+# local-dispatcher configuration — copy to
+# ~/.config/local-dispatcher/config.toml and adjust.
+#
+# Topology verified live 2026-10-16 on TR4:
+#   tr4-primary   http://127.0.0.1:8091     vLLM, qwen3.8-27b(-fp8), ctx 262144
+#                  = the primary coordinating session. is_primary: reserved,
+#                  never worker-scheduled.
+#   tr4-secondary http://127.0.0.1:8080     llama.cpp, served id
+#                  swift-1.5-iq3_xxs (claude --model label: qwen), ctx 92768
+#                  = has a live Cline interactive client -> manually_reserved.
+#                  Enable it ONLY when Cline is closed:
+#                  `ladd backend release tr4-secondary`
+#   i7            http://192.168.0.100:8080 llama.cpp, served id local-metrics,
+#                  alias qwen3.8-27b, ctx 142848
+#                  = has a second interactive Claude session -> enabled=false.
+#                  Enable ONLY when free:
+#                  `ladd backend enable i7` (then `ladd backend check i7`)
+#
+# Runtime changes via `ladd backend ...` apply to the live daemon only;
+# on the next daemon start this file is the source of truth and reasserts
+# these reserved/disabled states. That is a safety property, not a bug.
+
+[state]
+# root = "/home/andrei/.local/share/local-dispatcher"
+# worktree_root = "/home/andrei/.local/share/local-dispatcher/worktrees"
+# (worktree_root can point at a large disk, e.g. /dd2/...)
+# socket = "/home/andrei/.local/share/local-dispatcher/run/dispatcher.sock"
+
+[daemon]
+tick_s = 1.0
+probe_ttl_s = 30
+kill_grace_s = 10
+kill_confirm_s = 5
+min_start_budget_s = 60
+response_cap_chars = 8000
+context_warn_pct = 0.65
+context_overflow_usage_pct = 0.95
+diff_cap_bytes = 40960
+log_tail_lines = 200
+
+[worker]
+deadline_s = 1800
+max_attempts = 2
+output_limit_chars = 8000
+claude_executable = "/home/andrei/.local/bin/claude"
+cline_executable = "/usr/local/bin/cline"
+# allowed_tools = [Bash, Read, Edit, Write, Glob, Grep, TodoWrite,
+#                  mcp__mycelium__recall, mcp__mycelium__save,
+#                  mcp__mycelium__context, mcp__mycelium__recent]
+output_format = "stream-json"   # fallback: "json"
+prompt_via = "stdin"
+max_context_pct = 0.90
+max_output_tokens = 32000
+autocompact_pct = 70
+max_mcp_output_tokens = 16000
+anthropic_api_key = "local"
+permission_mode = "bypassPermissions"
+
+[mycelium]
+# command = ["/home/andrei/.venvs/mycelium/bin/mycelium", "serve"]
+# call_timeout_s = 10
+# max_recall_queries = 3
+# recall_limit = 5
+# memory_section_cap_chars = 4000
+
+# A group caps the TOTAL concurrency across its backends (PRD §7.5).
+[[resource_groups]]
+id = "tr4"
+max_concurrency = 1
+
+[[backends]]
+id = "tr4-primary"
+endpoint = "http://127.0.0.1:8091"
+model_id = "qwen3.8-27b-fp8"
+model_label = "qwen3.8-27b-fp8"
+is_primary = true
+notes = "primary coordinating session; never worker-scheduled"
+
+[[backends]]
+id = "tr4-secondary"
+endpoint = "http://127.0.0.1:8080"
+model_id = "swift-1.5-iq3_xxs"
+model_label = "qwen"
+manually_reserved = true
+reserved_note = "Cline interactive session"
+resource_group = "tr4"
+concurrency = 1
+
+[[backends]]
+id = "i7"
+endpoint = "http://192.168.0.100:8080"
+model_id = "local-metrics"
+model_label = "qwen3.8-27b"
+enabled = false
+notes = "second interactive Claude session; enable only when free"
+
+[[profiles]]
+id = "cc-worker"
+adapter = "claude"
+backend_ids = ["tr4-secondary", "i7"]
+deadline_s = 1800
+max_attempts = 2
+output_limit_chars = 8000
+# allow_test_repair = false
+
+# Projects can be listed here or added at runtime: `ladd project add`.
+# [[projects]]
+# id = "demo"
+# repo_path = "/dd2/andrei/claude/dispatcher/demo-repo"
+# integration_ref = "main"
+# mycelium_project = "demo"

@@ -1,0 +1,19 @@
+{
+  "job_id": "example-job",
+  "attempt_id": "example-attempt",
+  "outcome": "completed|incomplete|blocked|failed",
+  "summary": "Short factual result",
+  "changed_files": [],
+  "commit": null,
+  "tests": [
+    { "command": "example", "status": "passed|failed|not_run", "evidence_path": "path" }
+  ],
+  "acceptance_criteria": [
+    { "criterion": "example", "status": "met|unmet|unknown", "evidence": "reference" }
+  ],
+  "remaining_work": [],
+  "blockers": [],
+  "assumptions": [],
+  "checkpoint_path": "path",
+  "memory_references": []
+}

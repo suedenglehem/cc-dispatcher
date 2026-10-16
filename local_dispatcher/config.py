@@ -237,6 +237,10 @@ def load_config(path: str | Path | None = None) -> Config:
     mycelium = MyceliumConfig(**{k: v for k, v in m.items() if k in MyceliumConfig.__dataclass_fields__})
 
     def _backend(b: dict) -> BackendConfig:
+        if not b.get("id") or not b.get("endpoint"):
+            raise ValueError("every [[backends]] entry needs 'id' and "
+                             "'endpoint'; drop the empty [[backends]] table "
+                             "when it has no fields")
         return BackendConfig(
             id=b["id"], endpoint=b["endpoint"],
             openai_base_url=b.get("openai_base_url", ""),
@@ -251,10 +255,19 @@ def load_config(path: str | Path | None = None) -> Config:
         )
 
     backends = [_backend(b) for b in raw.get("backends", [])]
-    groups = [GroupConfig(id=g["id"], max_concurrency=g.get("max_concurrency", 1))
-              for g in raw.get("resource_groups", [])]
-    profiles = [
-        ProfileConfig(
+    groups = []
+    for g in raw.get("resource_groups", []):
+        if not g.get("id"):
+            raise ValueError("every [[resource_groups]] entry needs 'id'; "
+                             "drop the empty table when it has no fields")
+        groups.append(GroupConfig(id=g["id"],
+                                  max_concurrency=g.get("max_concurrency", 1)))
+    profiles = []
+    for p in raw.get("profiles", []):
+        if not p.get("id"):
+            raise ValueError("every [[profiles]] entry needs 'id'; drop the "
+                             "empty [[profiles]] table when it has no fields")
+        profiles.append(ProfileConfig(
             id=p["id"], adapter=p.get("adapter", "claude"),
             executable=p.get("executable", ""), args=p.get("args", []) or [],
             env_overrides=p.get("env_overrides", {}) or {},
@@ -263,18 +276,20 @@ def load_config(path: str | Path | None = None) -> Config:
             deadline_s=p.get("deadline_s", 0), max_attempts=p.get("max_attempts", 0),
             output_limit_chars=p.get("output_limit_chars", 0),
             allow_test_repair=p.get("allow_test_repair", False),
-        )
-        for p in raw.get("profiles", [])
-    ]
-    projects = [
-        ProjectConfig(
+        ))
+    projects = []
+    for p in raw.get("projects", []):
+        if not p.get("id") or not p.get("repo_path"):
+            raise ValueError("every [[projects]] entry needs 'id' and "
+                             "'repo_path'; drop the empty [[projects]] table "
+                             "when it has no fields")
+        projects.append(ProjectConfig(
             id=p["id"], repo_path=os.path.expanduser(p["repo_path"]),
-            integration_path=os.path.expanduser(p.get("integration_path", p["repo_path"])),
+            integration_path=os.path.expanduser(
+                p.get("integration_path", p["repo_path"])),
             integration_ref=p.get("integration_ref", "main"),
             mycelium_project=p.get("mycelium_project", ""),
-        )
-        for p in raw.get("projects", [])
-    ]
+        ))
 
     cfg = Config(paths=paths, daemon=daemon, worker=worker, mycelium=mycelium,
                  backends=backends, groups=groups, profiles=profiles, projects=projects)
