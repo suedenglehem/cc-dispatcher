@@ -118,7 +118,8 @@ def group_alive(pgid: int) -> bool:
         except OSError:
             continue
         parts = data[data.rfind(")") + 2:].split()
-        if len(parts) > 1 and int(parts[1]) == pgid and int(entry) > 1:
+        # pgrp is field 5 → index 2 after "pid (comm)"
+        if len(parts) > 2 and int(parts[2]) == pgid and int(entry) > 1:
             return True
     return alive
 
@@ -142,7 +143,8 @@ def pgid_of(pid: int) -> int | None:
     try:
         with open(f"/proc/{pid}/stat", "rb") as f:
             data = f.read().decode("ascii", "replace")
-        return int(data[data.rfind(")") + 2:].split()[1])
+        # fields after "pid (comm)": [0]=state, [1]=ppid, [2]=pgrp
+        return int(data[data.rfind(")") + 2:].split()[2])
     except (OSError, ValueError, IndexError):
         return None
 

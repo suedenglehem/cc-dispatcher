@@ -138,8 +138,8 @@ class Supervisor:
     async def kill_group(self, child: Child) -> bool:
         """SIGTERM → grace → SIGKILL. Returns True when the whole group is
         confirmed dead (the only state in which reservations may be released)."""
-        grace = self.cfg.kill_grace_s
-        confirm = self.cfg.kill_confirm_s
+        grace = self.cfg.daemon.kill_grace_s
+        confirm = self.cfg.daemon.kill_confirm_s
         if not group_alive(child.pgid):
             return True
         kill_group(child.pgid, signal.SIGTERM)

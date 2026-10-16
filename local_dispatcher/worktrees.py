@@ -79,16 +79,20 @@ async def ensure_worktree(job_id: str, repo_path: str, worktree_root: str,
     return path
 
 
-async def capture_changes(worktree_path: str) -> tuple[str, list[str]]:
-    """Return (diff patch, changed+untracked path list) relative to HEAD.
+async def capture_changes(worktree_path: str,
+                          base: str | None = None) -> tuple[str, list[str]]:
+    """Return (diff patch, changed+untracked path list) relative to `base`
+    (the job's base commit — covers committed AND uncommitted work) or to
+    HEAD when no base is given.
 
     Untracked files are listed (and their content not inlined); the patch
     covers tracked changes only. Callers cap the patch size.
     """
-    rc, diff, _ = await _git("diff", "HEAD", cwd=worktree_path)
+    ref = base or "HEAD"
+    rc, diff, _ = await _git("diff", ref, cwd=worktree_path)
     if rc != 0:
         diff = ""
-    rc, names, _ = await _git("diff", "--name-only", "HEAD", cwd=worktree_path)
+    rc, names, _ = await _git("diff", "--name-only", ref, cwd=worktree_path)
     changed = [x for x in names.splitlines() if x] if rc == 0 else []
     rc, untracked, _ = await _git("ls-files", "--others", "--exclude-standard", cwd=worktree_path)
     untracked = [x for x in untracked.splitlines() if x] if rc == 0 else []

@@ -109,7 +109,7 @@ class Jobs:
                    memory_queries, dependencies, profile_id, backend_id,
                    memory_required, mycelium_project, status, status_detail,
                    created_at, updated_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (job_id, project_id, params.idempotency_key, params.objective,
              json.dumps(params.acceptance_criteria), full,
              json.dumps(params.allowed_scope), json.dumps(params.relevant_files),

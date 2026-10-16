@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -35,6 +36,12 @@ class Database:
 
     # -- migrations ------------------------------------------------------
     def migrate(self) -> int:
+        # The version table is created by 0001 itself, so on a brand-new
+        # database it does not exist yet — create it if needed first.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            "v INTEGER PRIMARY KEY, "
+            "applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')))")
         applied = {r["v"] for r in self.conn.execute("SELECT v FROM schema_version")}
         files = sorted(MIGRATIONS_DIR.glob("*.sql"))
         for f in files:
@@ -56,6 +63,7 @@ class Database:
         return max(applied | {int(f.name.split('_', 1)[0]) for f in files})
 
     # -- transaction helper ----------------------------------------------
+    @contextmanager
     def tx(self, immediate: bool = True) -> Iterator[sqlite3.Connection]:
         """Context manager: BEGIN IMMEDIATE … COMMIT/ROLLBACK."""
         self.conn.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")

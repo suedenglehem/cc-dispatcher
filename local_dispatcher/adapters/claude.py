@@ -72,7 +72,8 @@ class ClaudeAdapter(WorkerAdapter):
         # Never let profile overrides re-introduce primary session vars.
         for bad in ("CLAUDE_SESSION_ID", "CLAUDE_CODE_ENTRYPOINT"):
             env.pop(bad, None)
-        return WorkerLaunch(cmd=cmd, env=env, cwd=worktree, packet=packet)
+        return WorkerLaunch(cmd=cmd, env=env, cwd=worktree, packet=packet,
+                            packet_via="stdin" if w.prompt_via == "stdin" else "argv")
 
     # -- stream parsing ----------------------------------------------------
     def parse_line(self, line: str, info: StreamInfo) -> None:
@@ -117,7 +118,7 @@ class ClaudeAdapter(WorkerAdapter):
         text_parts += info.raw_text[-50:]
         text = "\n".join(text_parts)
         for pat in _overflow_patterns:
-            if re.search(pat, text, re.IGNORECASE):
+            if pat.search(text):
                 return FailureClass.CONTEXT_OVERFLOW.value
         if ctx_limit and info.last_context_tokens is not None \
                 and info.last_context_tokens >= 0.95 * ctx_limit:

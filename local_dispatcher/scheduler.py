@@ -64,6 +64,10 @@ class Scheduler:
         self.jobs = jobs
         self.mycelium = mycelium
         self.launch_gate = asyncio.Lock()
+        # Test hook (PRD §14 test 20): awaited after the pre-filter passes
+        # and before the launch gate is taken, so tests can flip mode in the
+        # window where a stale pre-filter said "launch".
+        self.pre_gate_hook = None
         self._stopping = False
         self._tick_task: asyncio.Task | None = None
         self._last_prune = 0.0
@@ -223,8 +227,8 @@ class Scheduler:
             "id": p.id,
             "adapter": p.adapter,
             "executable": self.cfg.effective_executable(p),
-            "args": p.args or "[]",
-            "env_overrides": p.env_overrides or "{}",
+            "args": json.dumps(p.args or []),
+            "env_overrides": json.dumps(p.env_overrides or {}),
             "allowed_tools": json.dumps(self.cfg.effective_allowed_tools(p)),
             "deadline_s": self.cfg.effective_deadline(p),
             "max_attempts": self.cfg.effective_max_attempts(p),
@@ -233,6 +237,8 @@ class Scheduler:
         }
 
     async def _try_launch(self, job: dict) -> str:
+        if self.pre_gate_hook is not None:
+            await self.pre_gate_hook(job)
         async with self.launch_gate:
             conn = self.db.conn
             project = dict(conn.execute(
@@ -278,11 +284,12 @@ class Scheduler:
                                  (project["id"],)).fetchone()
                 if mode["mode"] != "team":
                     return "not_team"
+                allowed_ids = list(profile.backend_ids or [])
                 backend_id = self.backends.pick_backend(
-                    json.loads(profile.backend_ids or "[]"), job.get("backend_id"))
+                    allowed_ids, job.get("backend_id"))
                 if backend_id is None:
                     detail = self._no_backend_detail(
-                        json.loads(profile.backend_ids or "[]"), job.get("backend_id"))
+                        allowed_ids, job.get("backend_id"))
                     self.db.execute(
                         "UPDATE jobs SET status_detail=?, updated_at=? WHERE id=?",
                         (detail, now_iso(), job["id"]))
@@ -380,11 +387,15 @@ class Scheduler:
                 self.db.event("attempt", attempt_id, "spawn_failed", {"error": str(e)[:200]})
                 return "spawn_failed"
             with self.db.tx(immediate=True) as c:
-                c.execute("UPDATE attempts SET pid=?, pgid=?, start_identity=? "
-                          "WHERE id=?", (child.pid, child.pgid, child.identity,
-                                         attempt_id))
+                c.execute("UPDATE attempts SET pid=?, pgid=?, start_identity=?, "
+                          "status='running' WHERE id=?",
+                          (child.pid, child.pgid, child.identity, attempt_id))
+                c.execute("UPDATE jobs SET status='running', updated_at=? "
+                          "WHERE id=? AND status='starting'",
+                          (now_iso(), job["id"]))
             self.db.event("attempt", attempt_id, "launched",
                           {"backend": backend_id, "worktree": worktree})
+            self.db.event("job", job["id"], "running", {})
             return "launched"
 
     def _no_backend_detail(self, candidate_ids: list[str], preferred: str | None) -> str:
@@ -441,8 +452,8 @@ class Scheduler:
         # capture work (tracked changes since the job's base, whether or not the
         # worker committed, plus untracked paths)
         try:
-            diff, changed = await capture_changes(attempt["worktree_path"],
-                                                  job["base_commit"])
+            diff, changed = await capture_changes(
+                attempt["worktree_path"], job["base_commit"])
         except Exception:
             log.exception("capture_changes failed for %s", attempt_id)
             diff, changed = "", []
@@ -462,9 +473,9 @@ class Scheduler:
             if result_obj is not None else []
         scope_violations: list[str] = []
         allowed = json.loads(job["allowed_scope"] or "[]")
-        scope_violations |= set(check_scope(changed, allowed))
+        scope_violations.extend(check_scope(changed, allowed))
         if result_obj:
-            scope_violations |= set(check_scope(
+            scope_violations.extend(check_scope(
                 result_obj.get("changed_files") or [], allowed))
         scope_violations = sorted(set(scope_violations))
 

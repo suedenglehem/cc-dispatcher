@@ -6,7 +6,8 @@ Phase 1 = core daemon + ladd CLI, end-to-end on a scratch demo repo.
 
 ## Phase status
 - P1 core code: **complete** (all modules import-verified, CLIs run)
-- P1 tests + e2e demo: **in progress**
+- P1 tests: **complete** — 64 passed, 4 skipped (a10/a14/a15/a16 are P3 stubs)
+- P1 e2e demo on scratch `demo-repo` via `ladd`: **not yet run** (see next steps)
 - P2 (MCP + primary UX), P3 (recovery/memory/failure injection, all 20 acceptance tests), P4 (i7/Cline/hardening): not started
 
 ## Key decisions (final, per plan)
@@ -38,12 +39,22 @@ Phase 1 = core daemon + ladd CLI, end-to-end on a scratch demo repo.
 ## Test results
 - All P1 modules import OK; `ladd --help`, `local-dispatcher --help` verified
 - `config.example.toml` parses to correct topology (3 backends, group tr4=1, cc-worker profile)
-- pytest suite: **not yet written** (next step)
+- pytest: **64 passed, 4 skipped in ~51s** (skips = a10 restart-no-dup, a14/a15/a16 mycelium — all P3)
+  - Acceptance a01–a09, a11–a13, a17–a20 (18): green with fakes (in-proc daemon, fake backends/workers)
+  - Unit (46): ctx extraction ×3 probe shapes, packet renderer, result validator + evaluate_attempt
+    decision table + recovery-context bounding, migrations, event pruning, procfs identity/liveness,
+    API redaction + 8k cap
+- Bugs found/fixed by tests: scheduler missing `starting`→`running` transition (a05 blocker);
+  `re.search` flags on compiled regex in claude adapter; procfs `pgid_of` off-by-one (read ppid,
+  now pgrp field 5→idx 2) + same fix in `group_alive` member scan
 
 ## Next steps
-1. `tests/conftest.py` (temp state/config/fake backends/repo fixture/in-proc daemon/ApiClient)
-2. `tests/fakes/fake_worker.py` (modes: normal/slow/hang/checkpoint_then_crash/overflow/invalid_report/scope_violation/tests_fail/echo_packet; atomic launch counter) + `fake_backend.py`
-3. Unit tests (ctx derivation ×3 probe shapes, packet renderer, result validator, migrations)
-4. Acceptance tests a01–a08, a11–a13, a17–a20 (PRD §14)
-5. P1 exit: scratch `demo-repo` e2e via `ladd` with fake worker; then real claude worker (gated on a freed backend — both currently busy; ask user before live smoke)
-6. Commit per phase with test results
+1. P1 exit: scratch `demo-repo` e2e via `ladd` with fake worker (git init under `dispatcher/demo-repo`);
+   then real claude worker smoke — **gated on a freed backend** (both currently busy; ask user before live smoke)
+2. P2: api.py polish, mcp_adapter 8 real tools (`dispatch_*` + `dispatch_integrate`), `claude mcp add dispatcher`,
+   prompts shipped, drain/cancel/pause/resume/idempotency polish, docs/commands.md (§21)
+3. P3: stream-json usage tracking + 65% warning, checkpoint contract e2e, procfs startup reconcile + quarantine
+   (a10 real dispatcherd SIGKILL), mycelium client + packet injection + envelope + outage degrade + promote
+   (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp store) → ALL 20 acceptance green
+4. P4: i7 enable (1-token `ladd backend check` label-case), resource-group demo, Cline smoke → pass or
+   docs/cline-status.md (never faked), full docs + install.sh

@@ -360,7 +360,9 @@ class ApiClient:
 
     def call(self, method: str, **params) -> dict:
         try:
-            s = socket.create_connection(self.socket_path, timeout=self.timeout_s)
+            s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+            s.settimeout(self.timeout_s)
+            s.connect(self.socket_path)
         except (ConnectionRefusedError, FileNotFoundError) as e:
             raise ApiError(
                 ErrorCodes.DAEMON_NOT_RUNNING,
