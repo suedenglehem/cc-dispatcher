@@ -7,7 +7,11 @@ Phase 1 = core daemon + ladd CLI, end-to-end on a scratch demo repo.
 ## Phase status
 - P1 core code: **complete** (all modules import-verified, CLIs run)
 - P1 tests: **complete** — 64 passed, 4 skipped (a10/a14/a15/a16 are P3 stubs)
-- P1 e2e demo on scratch `demo-repo` via `ladd`: **not yet run** (see next steps)
+- P1 e2e demo on scratch `demo-repo` via `ladd`: **complete** (fake backend :40555 + fake worker, state `/tmp/ladd-e2e/state`):
+  submit → worktree+branch `dispatch/j_b0541bafdb` off recorded base → succeeded (valid result.json, commit 271053a,
+  artifacts result.json/diff.patch/stream.log) → primary cherry-pick to main (bb40b18) → `ladd integrate` accepted;
+  held job cancelled mid-run (worker group killed, reservations released, `group_confirmed: true` on every finish);
+  e2e-primary stayed `state=primary-reserved`; `ladd events` full audit trail
 - P2 (MCP + primary UX), P3 (recovery/memory/failure injection, all 20 acceptance tests), P4 (i7/Cline/hardening): not started
 
 ## Key decisions (final, per plan)
@@ -47,10 +51,19 @@ Phase 1 = core daemon + ladd CLI, end-to-end on a scratch demo repo.
 - Bugs found/fixed by tests: scheduler missing `starting`→`running` transition (a05 blocker);
   `re.search` flags on compiled regex in claude adapter; procfs `pgid_of` off-by-one (read ppid,
   now pgrp field 5→idx 2) + same fix in `group_alive` member scan
+- Bugs found/fixed by the ladd e2e (commit 0c0586c): cli `_row` NameError (comprehension-scoped `k`
+  in fallback genexpr); `_m_status` reservations `ORDER BY id` on a nonexistent column (→ `acquired_at, attempt_id`);
+  `_m_events` reading `detail` instead of the DDL column `detail_json`; `prompt_via` default `"argv"`
+  contradicting config.example.toml's documented `"stdin"` — supervisor gave workers stdin=DEVNULL so the
+  fake worker parsed no RESULT_PATH/CHECKPOINT_PATH (`invalid_result`). Default now `"stdin"`; the test
+  suite set stdin explicitly, which masked the mismatch. Suite re-run after the fix: 64 passed, 4 skipped
 
 ## Next steps
-1. P1 exit: scratch `demo-repo` e2e via `ladd` with fake worker (git init under `dispatcher/demo-repo`);
-   then real claude worker smoke — **gated on a freed backend** (both currently busy; ask user before live smoke)
+1. P1 exit remainder: real claude worker smoke on the scratch `demo-repo` —
+   **gated on a freed backend** (both currently busy: Cline :8080, 2nd Claude i7; ask user before live smoke,
+   re-reserve after). Verifies the exact claude flag combo (stream-json + stdin + `--allowedTools` + result-file contract).
+   Optional sandbox cleanup after: stop the e2e daemon (`pgrep -f "local_dispatch[e]r --config /tmp/ladd-e2e"`)
+   + fake backend (port 40555), `git worktree remove` the two e2e worktrees under `/tmp/ladd-e2e/state/worktrees`
 2. P2: api.py polish, mcp_adapter 8 real tools (`dispatch_*` + `dispatch_integrate`), `claude mcp add dispatcher`,
    prompts shipped, drain/cancel/pause/resume/idempotency polish, docs/commands.md (§21)
 3. P3: stream-json usage tracking + 65% warning, checkpoint contract e2e, procfs startup reconcile + quarantine
