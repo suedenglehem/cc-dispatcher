@@ -197,3 +197,80 @@ async def test_submit_unknown_backend_error_is_json_serializable(db):
     assert resp["ok"] is False
     assert resp["error"]["code"] == "backend_unknown"
     assert resp["error"]["detail"]["known"] == ["b1"]
+
+
+# -- status: bounded default view -----------------------------------------------
+
+def _status_server(db: Database) -> ApiServer:
+    srv = _api_server(db)
+    srv.backends = SimpleNamespace(worker_availability=lambda: [])
+    return srv
+
+
+def _insert_status_job(db: Database, jid: str, status: str,
+                       finished_at: str | None = None):
+    db.execute(
+        "INSERT INTO jobs (id, project_id, objective, base_commit, profile_id,"
+        " status, finished_at, failure_class)"
+        " VALUES (?, 'demo', ?, 'abcdef0123456789abcdef0123456789abcdef01',"
+        " 'p1', ?, ?, ?)",
+        (jid, "obj " + jid, status, finished_at,
+         None if status != "failed" else "crash"))
+
+
+def _seed_status_history(db: Database, n_terminal: int = 8):
+    db.execute("INSERT INTO projects (id, repo_path, integration_path, mode) "
+               "VALUES ('demo', '/tmp/x', '', 'team')")
+    db.execute("INSERT INTO worker_profiles (id, adapter, executable) "
+               "VALUES ('p1', 'claude', 'x')")
+    for i in range(n_terminal):
+        _insert_status_job(db, f"j_done{i:03d}", "succeeded",
+                           f"2026-10-17T10:{i:02d}:00Z")
+    _insert_status_job(db, "j_active", "running")
+    _insert_status_job(db, "j_stuck", "blocked")
+
+
+async def test_status_default_collapses_terminal_jobs(db):
+    _seed_status_history(db, 8)
+    out = await _status_server(db)._m_status({})
+    ids = [j["id"] for j in out["jobs"]]
+    assert "j_active" in ids and "j_stuck" in ids
+    assert not any(i.startswith("j_done") for i in ids)
+    assert out["jobs_terminal"]["count"] == 8
+    recent = out["jobs_terminal"]["recent"]
+    assert len(recent) == 5
+    assert recent[0]["id"] == "j_done007"
+    assert set(recent[0]) == {"id", "status", "failure_class", "finished_at"}
+
+
+async def test_status_all_jobs_returns_everything(db):
+    _seed_status_history(db, 8)
+    out = await _status_server(db)._m_status({"all_jobs": True})
+    assert len(out["jobs"]) == 10
+    assert "jobs_terminal" not in out
+
+
+async def test_status_default_fits_response_cap_with_history(db):
+    # Regression: the live daemon's default status grew with the job history
+    # and hit the 8k cap (13494 > 8000) once 20 jobs had accumulated.
+    _seed_status_history(db, 60)
+    srv = _status_server(db)
+    out = await srv._m_status({})
+    shaped = srv._shape(out)  # cap = 8000: must not raise
+    assert shaped["jobs_terminal"]["count"] == 60
+    assert len(shaped["jobs_terminal"]["recent"]) == 5
+
+
+async def test_status_all_jobs_is_exempt_from_response_cap(db):
+    # all_jobs is an explicit local full dump (the MCP forwarder never sends
+    # it), so the cap must not reject it once history outgrows 8k — while the
+    # bounded default it coexists with still fits.
+    _seed_status_history(db, 60)  # 62 full rows ≈ 34k chars
+    srv = _status_server(db)
+    resp = await srv._dispatch({"method": "status", "params": {"all_jobs": True}})
+    assert resp["ok"] is True
+    assert len(resp["result"]["jobs"]) == 62
+    assert "jobs_terminal" not in resp["result"]
+    resp2 = await srv._dispatch({"method": "status", "params": {}})
+    assert resp2["ok"] is True
+    assert resp2["result"]["jobs_terminal"]["count"] == 60

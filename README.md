@@ -67,6 +67,7 @@ Core guarantees (enforced in the daemon, not by convention):
 - Local inference backends exposing OpenAI-compatible `/v1/models`
 - Optionally: Mycelium memory (`mycelium serve`) for shared memory injection
   into task packets — **off unless configured**
+  https://github.com/constant-itis/mycelium-memory
 
 ## Install
 

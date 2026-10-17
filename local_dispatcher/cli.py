@@ -77,7 +77,7 @@ def _row(row: dict) -> str:
 
 # -- commands -------------------------------------------------------------------
 def c_status(args) -> int:
-    _out(args, _client(args).status())
+    _out(args, _client(args).status(all_jobs=args.all_jobs))
     return 0
 
 
@@ -221,6 +221,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("status", help="projects, jobs, workers, reservations")
+    p.add_argument("--all-jobs", action="store_true",
+                   help="list terminal (succeeded/failed/cancelled) jobs in "
+                        "full; default shows only active/blocked plus a count "
+                        "and the last five finished. This explicit full dump "
+                        "is exempt from the 8k response cap (the bounded "
+                        "default always stays under it)")
     p.set_defaults(fn=c_status)
 
     p = sub.add_parser("mode", help="switch a project's mode")

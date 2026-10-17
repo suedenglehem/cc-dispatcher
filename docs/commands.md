@@ -84,3 +84,45 @@ ladd --json events --subject-type job --subject-id <job_id>
 - A `blocked` job with `recovery_exhausted` needs a decision: `ladd resume`
   (fresh context from checkpoint + diff, same worktree) or a revised job.
 - `ladd reconcile` frees quarantined capacity from dead attempts.
+
+## View job history
+
+```sh
+ladd status                        # bounded default: active + blocked jobs in full,
+                                   # terminal jobs collapsed to a count + last five
+ladd --json status --all-jobs      # full list of every job, including terminal ones
+```
+
+- The default view is bounded forever: terminal jobs (succeeded/failed/
+  cancelled) collapse to `jobs_terminal: {count, recent: last 5}` so the
+  response can never outgrow the 8k cap as history accumulates.
+- `--all-jobs` is the explicit full dump (note the global flag position:
+  `ladd --json status --all-jobs`); it is exempt from the 8k response cap.
+  The MCP surface never sends `all_jobs`, so `dispatch_status` always gets
+  the bounded default.
+
+## Backend probing and recheck
+
+The daemon probes every configured backend's `/v1/models` at startup and
+again whenever a probe is older than `probe_ttl_s` (30s by default). A
+backend is schedulable only when it is `enabled`, not reserved, and
+**online with a fresh probe** — so after a boot change (dual-boot box), a
+restart, or a llama-server stop/start, scheduling follows the backend that
+is actually answering within one probe cycle, with no action needed.
+
+To recheck immediately instead of waiting up to 30s:
+
+```sh
+ladd workers --refresh             # force probes on all backends now
+ladd backend check <id>            # force one probe, show that backend's row
+```
+
+Mid-job behavior:
+
+- **You stop a backend a running job is using** — the worker's API calls
+  fail, the adapter classifies the attempt `backend_disconnect` (retryable),
+  and the next attempt may launch on another online backend from the
+  profile. Exhausted attempts end `blocked`.
+- **You start a backend a queued job is waiting on** — the job sits at
+  `status_detail = backend_offline` until a probe flips the backend online;
+  `ladd workers --refresh` skips the wait.

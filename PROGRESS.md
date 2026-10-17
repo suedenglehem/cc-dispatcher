@@ -185,9 +185,11 @@ at `aea44a6` (cube) — all three marked `integration_disposition: accepted`
 via `ladd integrate`; tests kept in `tests/test_app.py`; demo-repo suite
 5/5 passed on main. `j_bba5405826` (Cline) was a duplicate of the triple task
 and its branch held no commit (worktree changes only) — nothing to merge, not
-marked integrated. Next unfinished task: none — the project is in a clean
+marked integrated. Pushed to origin (github.com:suedenglehem/cc-dispatcher,
+`389ad9a..ad30551`, 2026-10-17): the dispatcher repo tree is clean and in
+sync with GitHub. Next unfinished task: none — the project is in a clean
 closed state (suite 104/104, 20/20 acceptance, both live smokes passed and
-recorded, backends re-secured).
+recorded, backends re-secured, repo pushed).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

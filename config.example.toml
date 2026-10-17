@@ -10,11 +10,13 @@
 #                  = has a live Cline interactive client -> manually_reserved.
 #                  Enable it ONLY when Cline is closed:
 #                  `ladd backend release tr4-secondary`
-#   i7            http://192.168.0.100:8080 llama.cpp, served id local-metrics,
-#                  alias qwen3.8-27b, ctx 142848
-#                  = has a second interactive Claude session -> enabled=false.
-#                  Enable ONLY when free:
-#                  `ladd backend enable i7` (then `ladd backend check i7`)
+#   ak            http://192.168.0.100:8080  llama.cpp, qwen3.8-27b — WINDOWS
+#                  boot of the same physical box as i7 below.
+#   i7            http://192.168.0.33:8080   llama.cpp, qwen3.8-27b — LINUX boot.
+#                  Only one boot (hence one IP) is up at a time; both are
+#                  enabled and the daemon probes every 30s, so scheduling
+#                  automatically follows whichever is actually running
+#                  (group "tr4" caps total to 1 job regardless).
 #
 # Runtime changes via `ladd backend ...` apply to the live daemon only;
 # on the next daemon start this file is the source of truth and reasserts
@@ -92,12 +94,28 @@ resource_group = "tr4"
 concurrency = 1
 
 [[backends]]
-id = "i7"
+# One physical box, dual boot. ak = WINDOWS boot (192.168.0.100), i7 =
+# LINUX boot (192.168.0.33). Both run llama-server :8080 serving
+# qwen3.8-27b; only one boot is up at a time, so only one of these two
+# ever responds. Keep both enabled — the 30s probes follow whichever
+# is live, and group "tr4" caps total concurrency to 1 job.
+id = "ak"
 endpoint = "http://192.168.0.100:8080"
-model_id = "local-metrics"
+model_id = "qwen3.8-27b"
 model_label = "qwen3.8-27b"
-enabled = false
-notes = "second interactive Claude session; enable only when free"
+enabled = true
+resource_group = "tr4"
+notes = "WINDOWS boot of the dual-boot box"
+
+[[backends]]
+# LINUX boot of the same physical box as ak (see its comment).
+id = "i7"
+endpoint = "http://192.168.0.33:8080"
+model_id = "qwen3.8-27b"
+model_label = "qwen3.8-27b"
+enabled = true
+resource_group = "tr4"
+notes = "LINUX boot of the dual-boot box"
 
 [[profiles]]
 id = "cc-worker"
@@ -105,7 +123,7 @@ adapter = "claude"
 # claude 2.1.30x sends reasoning_effort=high by default; the local
 # vLLM server accepts only xhigh/medium/low, so pin the effort here.
 args = ["--effort", "xhigh"]
-backend_ids = ["tr4-secondary", "i7"]
+backend_ids = ["tr4-secondary", "ak", "i7"]
 deadline_s = 1800
 max_attempts = 2
 output_limit_chars = 8000

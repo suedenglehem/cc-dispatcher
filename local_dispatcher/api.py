@@ -113,7 +113,12 @@ class ApiServer:
         params = req.get("params") or {}
         try:
             result = await self._call(method, params)
-            return {"ok": True, "result": self._shape(result)}
+            # status?all_jobs is an explicit local full dump (ladd status
+            # --all-jobs). The MCP forwarder never sends it — dispatch_status
+            # always uses the bounded default — so the opt-in dump is exempt
+            # from the cap that keeps the default surface bounded forever.
+            capped = not (method == "status" and params.get("all_jobs"))
+            return {"ok": True, "result": self._shape(result, capped)}
         except ApiError as e:
             return {"ok": False, "error": e.to_dict()}
         except ValidationError as e:
@@ -160,29 +165,36 @@ class ApiServer:
                     out.add(v)
         return [s for s in out if len(s) >= 8]
 
-    def _shape(self, result: dict) -> dict:
-        """Redact credential values, then enforce the 8k cap on the
-        serialized response (valid JSON in, valid JSON out)."""
+    def _shape(self, result: dict, capped: bool = True) -> dict:
+        """Redact credential values, then (unless exempted) enforce the 8k
+        cap on the serialized response (valid JSON in, valid JSON out).
+
+        `capped=False` is for explicit opt-in full dumps (status?all_jobs)
+        that a local human requests; the cap still guards every response the
+        primary session / MCP surface can trigger."""
         s = json.dumps(result)
         for secret in self._secrets():
             for variant in (secret,
                             secret.replace("\\", "\\\\").replace('"', '\\"')):
                 s = s.replace(variant, "[REDACTED]")
-        cap = self.cfg.daemon.response_cap_chars
-        if len(s) > cap:
-            raise ApiError(ErrorCodes.INTERNAL,
-                           f"response too large: {len(s)} > {cap} chars; "
-                           "narrow the query (pagination, include_result)")
+        if capped:
+            cap = self.cfg.daemon.response_cap_chars
+            if len(s) > cap:
+                raise ApiError(ErrorCodes.INTERNAL,
+                               f"response too large: {len(s)} > {cap} chars; "
+                               "narrow the query (pagination, include_result)")
         return json.loads(s)
 
     # -- methods -------------------------------------------------------------------
     async def _m_status(self, p: dict) -> dict:
         conn = self.db.conn
+        all_jobs = bool(p.get("all_jobs"))
         projects = [dict(r) for r in conn.execute(
             "SELECT id, repo_path, integration_path, integration_ref, "
             "mycelium_project, mode, drain_policy, mode_changed_at "
             "FROM projects ORDER BY id")]
         jobs = []
+        terminal = []
         for r in conn.execute(
                 "SELECT id, project_id, objective, status, status_detail, "
                 "profile_id, backend_id, attempt_count, base_commit, "
@@ -191,7 +203,13 @@ class ApiServer:
                 "FROM jobs ORDER BY created_at, id"):
             d = dict(r)
             d["objective"] = d["objective"][:120]
-            jobs.append(d)
+            # Default view stays bounded as the history grows: terminal jobs
+            # (succeeded/failed/cancelled) collapse into a count + last five;
+            # `all_jobs=true` (ladd status --all-jobs) returns them in full.
+            if not all_jobs and d["status"] in ("succeeded", "failed", "cancelled"):
+                terminal.append(d)
+            else:
+                jobs.append(d)
         reservations = {
             "active": [dict(x) for x in conn.execute(
                 "SELECT * FROM reservations WHERE status='active' "
@@ -201,7 +219,7 @@ class ApiServer:
                 "ORDER BY acquired_at, attempt_id")],
         }
         sv = conn.execute("SELECT MAX(v) AS v FROM schema_version").fetchone()["v"]
-        return {
+        out = {
             "projects": projects,
             "jobs": jobs,
             "workers": self.backends.worker_availability(),
@@ -209,6 +227,19 @@ class ApiServer:
             "schema_version": sv,
             "time": now_iso(),
         }
+        if not all_jobs:
+            out["jobs_terminal"] = {
+                "count": len(terminal),
+                "recent": [
+                    {k: t[k] for k in ("id", "status", "failure_class",
+                                       "finished_at")}
+                    for t in sorted(terminal,
+                                     key=lambda t: (t["finished_at"] or "",
+                                                    t["id"]),
+                                     reverse=True)[:5]
+                ],
+            }
+        return out
 
     async def _m_set_mode(self, p: dict) -> dict:
         params = SetModeParams(**p)
@@ -452,8 +483,8 @@ class ApiClient:
                        err.get("message", "unknown daemon error"), **extra)
 
     # -- typed convenience ---------------------------------------------------------
-    def status(self) -> dict:
-        return self.call("status")
+    def status(self, all_jobs: bool = False) -> dict:
+        return self.call("status", all_jobs=all_jobs)
 
     def set_mode(self, mode: str, project_id: str | None = None,
                  policy: str | None = None) -> dict:

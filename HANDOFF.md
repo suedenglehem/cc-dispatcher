@@ -32,10 +32,12 @@ agents do the reasoning.
   per-attempt `--data-dir` isolation) + 4 tests driving it through the real daemon with a
   fake binary. Full docs set written. User freed both backends → the two gated live smokes
   ran:
-  - **Claude Code smoke on `ak` (ex-i7): PASSED** — `j_1bd3187818` succeeded on the first
+  - **Claude Code smoke on `ak`: PASSED** — `j_1bd3187818` succeeded on the first
     attempt (~2.5 min, real model), valid result.json + diff (added `triple(a)`), commit
-    97240a9, tests via `uv`. Host renamed i7→ak, IP 192.168.0.100→**192.168.0.33** (config +
-    `/etc/hosts` note updated; served id == label so no case gate).
+    97240a9, tests via `uv`. TOPOLOGY NOTE (corrected 2026-10-17, user-confirmed): this
+    physically ran on 192.168.0.33 — the LINUX boot of the dual-boot box, named `i7` in
+    config (the earlier "host renamed i7→ak, moved .100→.33" note was WRONG; see
+    Verified environment).
   - **Cline smoke on tr4-secondary (strata): first attempt FAILED, root-caused,
     dispatcher-side fix, RE-RAN — PASS** (2026-10-17, after the user freed the backend).
     First attempt (`j_bc96773bee`) exit 1, class `crash`: the 401 came from
@@ -113,19 +115,50 @@ agents do the reasoning.
 - tr4-secondary `:8080` = strata custom Python serving stack (`/dd2/strata/serve/server.py`, serves
   `swift-1.5-iq3_xxs`, claude label `qwen`, ctx_max 83491) = Cline interactive → `manually_reserved`
   (RESTORED to reserved after the 10-17 demo)
-- **ak** (host renamed from i7 on 2026-10-17) `192.168.0.33:8080` (llama.cpp, served id
-  `qwen3.8-27b` Q6_K, n_ctx 122880, ctx_max 110592) = 2nd worker backend → `enabled=false`
-  in config (RESTORED to disabled after the 10-17 demo). **Use the IP, not the name** — the
-  `/etc/hosts` entry still points at the stale `192.168.0.100`.
+- **Dual-boot box** (topology user-corrected 2026-10-17; the old "i7 renamed to ak,
+  moved .100→.33" note was WRONG): ONE physical machine, two boots — `ak` =
+  192.168.0.100:8080 = **WINDOWS** boot, `i7` = 192.168.0.33:8080 = **LINUX** boot;
+  both serve `qwen3.8-27b` (Q6_K, n_ctx 122880, ctx_max 110592, served id == label,
+  no case gate); only one boot (one IP) is up at a time. BOTH ship `enabled=true` in
+  config (group `tr4`, max_concurrency=1); startup probes + the 30s TTL follow
+  whichever boot is live. Verified after the 2026-10-17 restart: `i7 state=available
+  health=online` (Linux boot up), `ak state=offline health=offline` (Windows boot down).
+  Pinned as mycelium #215 (OVERRIDES-PRIOR).
 - claude **2.1.302** (needs `--verbose` for stream-json; vLLM rejects default effort `high` → `--effort xhigh`)
 - **Never read/echo `~/.cline/data`** (provider secret). Never touch the two interactive sessions.
-- **Post-restart ops:** config reasserts on daemon start — after ANY restart, re-release tr4-secondary and
-  re-enable ak if workers should run on them. `pgrep -af local-dispatcher` finds the daemon (not `dispatcherd`).
+- **Post-restart ops:** config reasserts on daemon start — ak/i7 now ship `enabled=true`
+  in config (no re-enable needed after restart); tr4-secondary ships `manually_reserved`
+  (re-release only while no Cline interactive session uses it). `pgrep -af
+  local-dispatcher` finds the daemon (not `dispatcherd`).
 - **No hot-reload (learned the hard way 2026-10-17):** editing `local_dispatcher/*.py` on disk does
   NOT affect the running daemon. After any code change that must be live (e.g. the `memory_references`
   fix — a real-model job cited numeric ids and the OLD daemon still rejected them), restart:
   `systemctl --user restart local-dispatcher`. Check freshness with
   `systemctl --user show local-dispatcher -p MainPID,ActiveEnterTimestampMonotonic` vs file mtimes.
+
+## Changed files (2026-10-17 — status-cap fix + dual-boot config)
+- `local_dispatcher/api.py` — `status` response bounded forever: the default view keeps
+  active + blocked jobs in full and collapses terminal (succeeded/failed/cancelled) jobs
+  to `jobs_terminal: {count, recent: last 5}`; explicit `all_jobs=true` returns the full
+  list and is EXEMPT from the 8k response cap (`_dispatch` passes
+  `capped = not (method == "status" and params.get("all_jobs"))`; the MCP forwarder
+  never sends `all_jobs`, so `dispatch_status` always gets the bounded default).
+  Fixes live `ladd status` failure `response too large: 13494 > 8000`.
+- `local_dispatcher/cli.py` — `ladd status --all-jobs` flag (note `--json` is global:
+  `ladd --json status --all-jobs`).
+- `tests/test_u_db_procfs_api.py` (+4) — collapse shape (count + last 5, exact recent
+  keys), all_jobs full list, default-with-60-terminal-jobs stays under the 8k cap,
+  all_jobs exempt from the cap while the bounded default coexisting still fits.
+- `~/.config/local-dispatcher/config.toml` (LIVE, not in repo) + `config.example.toml` —
+  corrected dual-boot topology: `ak` = 192.168.0.100 WINDOWS boot, `i7` =
+  192.168.0.33 LINUX boot, one physical box, both `enabled=true` (group `tr4`);
+  header comment fixed; `cc-worker` `backend_ids = ["tr4-secondary", "ak", "i7"]`.
+  Daemon restarted; startup probes + 30s TTL follow the live boot; recheck anytime
+  via `ladd workers --refresh` / `ladd backend check <id>` (already existed — no
+  scheduler code changed).
+- `docs/commands.md` — "View job history" (bounded default + `--all-jobs` cap
+  exemption) and "Backend probing and recheck" (probe cadence, forced recheck,
+  mid-job stop ⇒ `backend_disconnect` retry / start ⇒ `backend_offline` until probe).
 
 ## Changed files (2026-10-17 — live smokes + two bug fixes)
 - `local_dispatcher/backends.py` — `sync()` removal path: a backend dropped from config is
@@ -293,7 +326,7 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **102 passed, 0 skipped** (~95s) — **20/20 acceptance tests green**
+- pytest: **108 passed, 0 skipped** — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
   (temp store, user `~/.mycelium` untouched — 1.9s / 4.4s / 2.3s); P2 mcp_adapter (8): green
@@ -309,10 +342,11 @@ agents do the reasoning.
   **ccline wrapper ×2 — real `bin/ccline` against a fake `cline` shim: auth args
   (-b baseUrl / -m model / -k key / --data-dir) + unchanged-argv forwarding +
   missing-data-dir / missing-OPENAI_API_BASE / no-key negatives**) green
-- Unit (53): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
+- Unit (57): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
   `classify` overflow-threshold (3), packet renderer, result validator + evaluate_attempt decision
   table + recovery-context bounding, migrations, event pruning, procfs identity/liveness, API redaction +
   8k cap + submit-error JSON-serializability (2 regression tests for the ProfileConfig/BackendConfig leak)
+  + status bounded view / all_jobs cap exemption (4)
 
 ## Demo (scratch `demo-repo`, real backends, 2026-10-17) — COMPLETE
 - Team mode, real claude worker on tr4-secondary: `j_7e53e663b7` (multiply) succeeded → primary ff-merged
@@ -366,3 +400,12 @@ agents do the reasoning.
    in `tests/test_app.py`; demo-repo suite 5/5 passed on main. `j_bba5405826`
    (Cline) was a duplicate of the triple task with no commit on its branch —
    nothing to merge, not marked integrated.
+6. Post-P4 (2026-10-17): **(a) `ladd status` 8k-cap failure — FIXED + verified live**
+   (default bounded at 4095 chars with 20 jobs in history; `--all-jobs` returns the
+   13494-char full dump, cap-exempt; MCP path bounded; +4 regression tests; suite
+   108 passed). **(b) Dual-boot topology corrected per user** — ak=.100 WINDOWS /
+   i7=.33 LINUX, one box, both enabled; NO code change needed: startup probes +
+   30s TTL + `ladd workers --refresh`/`ladd backend check <id>` already provide the
+   requested recheck, and a mid-job backend stop classifies `backend_disconnect`
+   (retryable, may relaunch on the other online backend). Verified after restart:
+   i7 available/online, ak offline. Mycelium #215 pinned (OVERRIDES-PRIOR).
