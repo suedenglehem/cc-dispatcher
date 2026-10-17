@@ -219,7 +219,14 @@ class ApiServer:
 
     async def _m_job(self, p: dict) -> dict:
         params = JobRefParams(**p)
-        return self.jobs.job_view(params.job_id, include_result=params.include_result)
+        view = self.jobs.job_view(params.job_id, include_result=params.include_result)
+        # live usage for in-flight attempts (durable usage_json covers the rest)
+        for a in view.get("attempts") or []:
+            if a.get("status") in ("running", "starting"):
+                lc = self.scheduler.live_context(a["id"])
+                if lc:
+                    a.update(lc)
+        return view
 
     async def _m_cancel(self, p: dict) -> dict:
         params = CancelParams(**p)

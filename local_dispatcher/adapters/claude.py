@@ -110,7 +110,8 @@ class ClaudeAdapter(WorkerAdapter):
 
     # -- failure classification ---------------------------------------------
     def classify(self, *, exit_code: int, info: StreamInfo,
-                 ctx_limit: int | None) -> str | None:
+                 ctx_limit: int | None,
+                 overflow_pct: float = 0.95) -> str | None:
         result = info.result or {}
         is_error = bool(result.get("is_error")) or str(
             result.get("subtype", "")).startswith("error")
@@ -123,7 +124,7 @@ class ClaudeAdapter(WorkerAdapter):
             if pat.search(text):
                 return FailureClass.CONTEXT_OVERFLOW.value
         if ctx_limit and info.last_context_tokens is not None \
-                and info.last_context_tokens >= 0.95 * ctx_limit:
+                and info.last_context_tokens >= overflow_pct * ctx_limit:
             return FailureClass.CONTEXT_OVERFLOW.value
         lowered = text.lower()
         if any(s in lowered for s in ("econnrefused", "connection refused",

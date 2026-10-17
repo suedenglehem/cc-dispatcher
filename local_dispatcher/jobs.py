@@ -257,9 +257,12 @@ class Jobs:
         }
         attempts = conn.execute(
             "SELECT id, attempt_no, status, backend_id, exit_code, failure_class, "
-            "started_at, ended_at, worktree_path, branch FROM attempts "
+            "started_at, ended_at, worktree_path, branch, usage_json FROM attempts "
             "WHERE job_id=? ORDER BY attempt_no", (job_id,)).fetchall()
         view["attempts"] = [dict(a) for a in attempts]
+        for a in view["attempts"]:
+            raw = a.pop("usage_json", None)
+            a["usage"] = json.loads(raw) if raw else None
         if include_result:
             res = j["result_json"]
             view["result"] = json.loads(res) if res else None

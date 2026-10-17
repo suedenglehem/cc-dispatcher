@@ -15,6 +15,8 @@ Modes:
   hold                   sleep FAKE_HOLD_S, then normal (drain/cancel tests)
   hang                   sleep ~10min (deadline/kill tests)
   overflow               attempt 1: context-overflow error, exit 1; later: normal
+  high_context           emits input_tokens=FAKE_USAGE_TOKENS, holds
+                         FAKE_CTX_HOLD_S with the usage live, then normal
   crash_once             attempt 1: no checkpoint, exit 3; later: normal
   checkpoint_then_crash  attempt 1: checkpoint saved, exit 3; later: normal
   invalid_report         always: exit 0 with no result file
@@ -79,8 +81,12 @@ def _atomic_write(path: str, text: str) -> None:
 def _stream_lines() -> None:
     aid = os.environ.get("DISPATCHER_ATTEMPT_ID", "?-a?")
     _emit({"type": "system", "subtype": "init", "session_id": f"fake-{aid}"})
-    _emit({"type": "assistant", "message": {
-        "usage": {"input_tokens": 120, "cache_read_input_tokens": 30}}})
+    big = os.environ.get("FAKE_USAGE_TOKENS")
+    if big:
+        usage = {"input_tokens": int(big)}
+    else:
+        usage = {"input_tokens": 120, "cache_read_input_tokens": 30}
+    _emit({"type": "assistant", "message": {"usage": usage}})
 
 
 def _valid_result(job_id: str, attempt_id: str, checkpoint_path: str,
@@ -156,6 +162,12 @@ def _run() -> int:
         time.sleep(hold)
 
     _stream_lines()
+
+    if mode == "high_context":
+        # hold AFTER the usage line so the live 65% warning is observable
+        ctx_hold = float(os.environ.get("FAKE_CTX_HOLD_S", "0"))
+        if ctx_hold:
+            time.sleep(ctx_hold)
 
     if mode == "overflow" and n == 1:
         _emit({"type": "result", "subtype": "error_max_tokens",

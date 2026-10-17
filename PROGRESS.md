@@ -22,11 +22,24 @@
 - **Green with fakes (18):** a01–a09, a11–a13, a17–a20
 - **P3-gated (4, need real subprocesses):** a10 (real `dispatcherd` SIGKILL → adopt, no duplicate),
   a14/a15/a16 (real `mycelium serve` under `MYCELIUM_CONFIG` → temp store)
-- Suite: **72 passed, 4 skipped** (skips = the 4 P3-gated above)
+- Non-acceptance P3: `test_i_context_warning.py` (2, green)
+- Suite: **81 passed, 4 skipped** (skips = the 4 P3-gated above)
 
 ## Current milestone: P3 (recovery / restart / memory / failure injection)
-Goal: all 20 acceptance tests green, using real subprocesses. Remaining:
-1. stream-json usage tracking + 65% context warning + overflow evidence (per-turn `usage`)
+Goal: all 20 acceptance tests green, using real subprocesses.
+Status: **step 1 done (2026-10-17)** — stream-json usage tracking was already wired
+(`adapter.parse_line` → `StreamInfo.last_context_tokens`); this step made it observable and
+configurable: `results.context_pct()` helper, one-shot per-attempt `context_warning` event from
+the tick (`Scheduler._context_watch`, deduped via `Child.context_warned`), `daemon.context_warn_pct`
+and `daemon.context_overflow_usage_pct` now actually drive the warning and the overflow classifier
+(was hardcoded 0.95), live `context_pct`/`context_warning` in the `job` view for running attempts,
+durable `usage_json` = `{last_context_tokens, ctx_limit, context_pct, num_turns, session_id}`.
+New tests: `test_u_ctx.py` (+7 unit: context_pct math/boundary/unknown, classify threshold),
+`test_i_context_warning.py` (+2 integration: live view + one-shot event + durable evidence;
+below-threshold negative). Fake worker gained `high_context` mode (+`FAKE_USAGE_TOKENS`,
+`FAKE_CTX_HOLD_S`).
+Remaining:
+1. ~~stream-json usage tracking + 65% context warning + overflow evidence~~ ✅
 2. checkpoint contract + context-overflow / crash / backend-disconnect recovery
    (`RECOVERY_CONTEXT` = latest checkpoint + bounded diff; **fresh session, never `--resume`**)
 3. procfs startup reconcile + quarantine — a10: real `dispatcherd` SIGKILL mid-job → restart →
@@ -35,6 +48,12 @@ Goal: all 20 acceptance tests green, using real subprocesses. Remaining:
    (a14/a15/a16; real `mycelium serve` under a temp store, user store untouched)
 5. Hardening: scope `startup_reconcile` orphan-kill to the instance's own db/lock
    (the global `/proc` marker-scan footgun — see HANDOFF.md "Known footgun")
+
+Next unfinished task: P3 step 2 — crash / checkpoint-then-crash recovery e2e tests: the
+fake-worker modes `crash_once`, `checkpoint_then_crash`, `tests_fail` exist but no test drives
+them yet; add: crash → retry in same worktree succeeds; checkpoint-then-crash → attempt 2 gets
+a CERTAIN recovery context (`uncertain=false`, checkpoint present) and succeeds; tests_fail →
+failed (non-retryable). Then step 3 (a10 real-dispatcherd reconcile).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

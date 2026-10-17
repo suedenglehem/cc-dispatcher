@@ -31,6 +31,20 @@ def _is_sha(v) -> bool:
     return isinstance(v, str) and 7 <= len(v) <= 64 and all(c in _SHA for c in v)
 
 
+def context_pct(last_context_tokens, ctx_max, warn_pct: float = 0.65):
+    """Return (pct, warning) from a per-turn usage measurement.
+
+    `pct` is the fraction of the working context budget in use, or None when
+    not measurable — no usage seen yet, or no configured limit. PRD §9: show
+    unknown rather than fabricate a percentage. `warning` is True only when the
+    measurement is real and has crossed the 65% threshold (configurable).
+    """
+    if not last_context_tokens or not ctx_max or ctx_max <= 0:
+        return None, False
+    pct = last_context_tokens / ctx_max
+    return pct, (pct >= warn_pct)
+
+
 def load_result(path: str) -> tuple[dict | None, str | None]:
     """Return (parsed dict, None) or (None, error string). Never raises."""
     try:

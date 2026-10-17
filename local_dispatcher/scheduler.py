@@ -24,8 +24,9 @@ from .db import now_iso
 from .models import ApiError, ErrorCodes, FailureClass
 from .packets import render_packet
 from .procfs import group_alive, identity_matches, kill_group, make_identity, pid_alive, scan_marker_processes
-from .results import (build_recovery_context, evaluate_attempt, format_recovery_context,
-                      load_result, parse_checkpoint, validate_result)
+from .results import (build_recovery_context, context_pct, evaluate_attempt,
+                      format_recovery_context, load_result, parse_checkpoint,
+                      validate_result)
 from .supervisor import Supervisor, _attempt_no_from_id
 from .worktrees import capture_changes, check_scope, ensure_worktree, is_ancestor, resolve_ref
 
@@ -107,6 +108,7 @@ class Scheduler:
     async def tick(self) -> None:
         await self._probe_due()
         await self._reap()
+        await self._context_watch()
         await self._deadline_check()
         await self._launch_queued()
         now = time.time()
@@ -411,6 +413,44 @@ class Scheduler:
                 return "backend_offline"
         return "no_capacity"
 
+    # -- live context ---------------------------------------------------------------
+    def live_context(self, attempt_id: str) -> dict | None:
+        """Live usage measurement for an in-memory child: fraction of the
+        working context budget in use. None when the attempt is not live in
+        this daemon (finished or re-adopted elsewhere) — callers show the
+        durable `usage` record instead (PRD §9: unknown, not fabricated)."""
+        child = self.supervisor.children.get(attempt_id)
+        if child is None:
+            return None
+        row = self.db.query_one(
+            "SELECT backend_id FROM attempts WHERE id=?", (attempt_id,))
+        ctx_max = None
+        if row:
+            br = self.backends.health_row(row["backend_id"])
+            ctx_max = br.get("ctx_max") if br else None
+        pct, warn = context_pct(child.info.last_context_tokens, ctx_max,
+                                self.cfg.daemon.context_warn_pct)
+        return {"context_pct": pct, "context_warning": warn,
+                "last_context_tokens": child.info.last_context_tokens,
+                "ctx_max": ctx_max}
+
+    async def _context_watch(self) -> None:
+        """One-shot 65% context warning per attempt, emitted from the tick.
+        Deduped by Child.context_warned; the durable record (usage_json at
+        reap) carries the final measurement."""
+        for child in list(self.supervisor.children.values()):
+            if child.context_warned:
+                continue
+            lc = self.live_context(child.attempt_id)
+            if lc and lc["context_warning"]:
+                child.context_warned = True
+                self.db.event("attempt", child.attempt_id, "context_warning",
+                              {"context_pct": round(lc["context_pct"], 4),
+                               "last_context_tokens": lc["last_context_tokens"],
+                               "ctx_max": lc["ctx_max"]})
+                log.info("context warning: %s at %.1f%%",
+                         child.attempt_id, lc["context_pct"] * 100)
+
     # -- finalize -------------------------------------------------------------------
     def _current_attempt_id(self, job_id: str) -> str | None:
         r = self.db.query_one(
@@ -484,7 +524,8 @@ class Scheduler:
             adapter_class = FailureClass.EXIT_UNKNOWN.value
         else:
             adapter_class = adapter.classify(
-                exit_code=exit_code, info=child.info, ctx_limit=ctx_limit)
+                exit_code=exit_code, info=child.info, ctx_limit=ctx_limit,
+                overflow_pct=self.cfg.daemon.context_overflow_usage_pct)
 
         # reservation release is gated on confirmed group termination
         group_ok = not group_alive(child.pgid)
@@ -499,7 +540,12 @@ class Scheduler:
                 scope_violations=scope_violations,
                 allow_test_repair=bool(profile and profile.allow_test_repair))
 
-        usage = {"last_context_tokens": child.info.last_context_tokens,
+        # overflow evidence: the measured pct of the working budget at finish
+        # (None = not measurable; never fabricated, PRD §9)
+        _ctok, _ctxmax = child.info.last_context_tokens, ctx_limit
+        usage = {"last_context_tokens": _ctok,
+                 "ctx_limit": _ctxmax,
+                 "context_pct": (context_pct(_ctok, _ctxmax)[0] if _ctok and _ctxmax else None),
                  "num_turns": child.info.num_turns, "session_id": child.info.session_id}
 
         with self.db.tx(immediate=True) as c:

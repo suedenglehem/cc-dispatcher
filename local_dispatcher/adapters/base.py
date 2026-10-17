@@ -47,9 +47,14 @@ class WorkerAdapter:
         raise NotImplementedError
 
     def classify(self, *, exit_code: int, info: StreamInfo,
-                 ctx_limit: int | None) -> str | None:
+                 ctx_limit: int | None,
+                 overflow_pct: float = 0.95) -> str | None:
         """Return a failure class string, or None when the process level is
-        clean (the result-file contract is validated separately)."""
+        clean (the result-file contract is validated separately).
+
+        `overflow_pct` is the fraction of the context budget at which a
+        near-full `last_context_tokens` is classified as context_overflow
+        (config: `daemon.context_overflow_usage_pct`)."""
         raise NotImplementedError
 
 

@@ -71,7 +71,10 @@ class ClineAdapter(WorkerAdapter):
                 info.result = obj
 
     def classify(self, *, exit_code: int, info: StreamInfo,
-                 ctx_limit: int | None) -> str | None:
+                 ctx_limit: int | None,
+                 overflow_pct: float = 0.95) -> str | None:
+        # Cline --json has no stable usage channel, so overflow_pct never
+        # applies here; the kwarg keeps the protocol uniform.
         if exit_code == 0 and not (info.result or {}).get("is_error"):
             return None
         text = "\n".join(info.raw_text[-50:]).lower()

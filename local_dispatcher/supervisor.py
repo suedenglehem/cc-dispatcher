@@ -36,6 +36,7 @@ class Child:
     stream_task: asyncio.Task | None = None
     killed: bool = False
     deadline_deadline: float | None = None    # time.time() budget, set by watchdog
+    context_warned: bool = False              # one-shot 65% warning fired
 
 
 class Supervisor:
