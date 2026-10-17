@@ -359,5 +359,10 @@ agents do the reasoning.
    + `/tmp/cline-cc-test` scratch dirs deleted; 3 stale `/tmp/ladd-e2e` registry entries
    pruned. The 21 `dispatch/*` branches were KEPT (integration still possible — results
    also live in `artifacts/<job>/attempt-1/diff.patch`); artifacts intact (7MB).
-   Remaining open item (user's call): whether to integrate the demo smoke results
-   (triple/cube/is_even) into demo-repo main — left unmerged by design.
+   **Integration DONE (2026-10-17, user-requested):** demo smoke results merged
+   into demo-repo main — `j_1bd3187818` fast-forwarded to `97240a9` (triple),
+   `j_3092d3777e` merged at `946119a` (is_even), `j_a3b9717dda` merged at
+   `aea44a6` (cube); all three marked `accepted` via `ladd integrate`; tests kept
+   in `tests/test_app.py`; demo-repo suite 5/5 passed on main. `j_bba5405826`
+   (Cline) was a duplicate of the triple task with no commit on its branch —
+   nothing to merge, not marked integrated.

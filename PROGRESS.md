@@ -178,9 +178,16 @@ Housekeeping **DONE (2026-10-17):** all 18 stale demo worktrees removed (verifie
 active jobs/attempts first; `worktrees/` now empty), `/tmp/cline-seed-test*` +
 `/tmp/cline-cc-test` scratch dirs deleted; the 21 `dispatch/*` branches kept for
 possible integration (diffs also in `artifacts/<job>/attempt-1/diff.patch`);
-artifacts intact (7MB). Next unfinished task: none — the only open item is the
-user's call on integrating demo smoke results (`triple` etc.) into demo-repo main
-(left unmerged by design).
+artifacts intact (7MB). Demo smoke results **integrated into demo-repo main
+(2026-10-17, user-requested):** `j_1bd3187818` fast-forwarded to `97240a9`
+(triple), `j_3092d3777e` merged at `946119a` (is_even), `j_a3b9717dda` merged
+at `aea44a6` (cube) — all three marked `integration_disposition: accepted`
+via `ladd integrate`; tests kept in `tests/test_app.py`; demo-repo suite
+5/5 passed on main. `j_bba5405826` (Cline) was a duplicate of the triple task
+and its branch held no commit (worktree changes only) — nothing to merge, not
+marked integrated. Next unfinished task: none — the project is in a clean
+closed state (suite 104/104, 20/20 acceptance, both live smokes passed and
+recorded, backends re-secured).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
