@@ -70,8 +70,15 @@ def _log_phase(phase: str) -> None:
 
 
 def _emit(obj: dict) -> None:
-    sys.stdout.write(json.dumps(obj) + "\n")
-    sys.stdout.flush()
+    try:
+        sys.stdout.write(json.dumps(obj) + "\n")
+        sys.stdout.flush()
+    except (BrokenPipeError, OSError):
+        # Our supervisor died mid-run: the read end of the stream pipe is
+        # gone. The result contract is file-based (RESULT_PATH /
+        # CHECKPOINT_PATH), so keep going — the re-adopting daemon takes
+        # the result file as the authority (acceptance test 10).
+        pass
 
 
 def _atomic_write(path: str, text: str) -> None:

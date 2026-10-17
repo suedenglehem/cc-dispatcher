@@ -15,11 +15,13 @@ agents do the reasoning.
 - P2 (MCP + primary UX): **complete** — mcp_adapter 8 tools done+tested, `claude mcp add dispatcher` done,
   full primary↔worker loop demonstrated live (submit → worker runs → primary ff-merges → `ladd integrate`
   accepted → drain to single). Backends restored to safe state. Suite 72 passed / 4 P3-skip.
-- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — steps 1–2
+- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — steps 1–3
   done (2026-10-17): step 1 = live 65% context warning + overflow evidence + both config knobs
   wired; step 2 = crash / checkpoint-then-crash / backend-disconnect / tests-fail recovery e2e
-  (`test_i_crash_recovery.py`, 4 tests, packet-level proof via `FAKE_ECHO_PACKET`). Next: step 3
-  (a10: real `dispatcherd` SIGKILL mid-job → restart → adopt, no duplicate)
+  (`test_i_crash_recovery.py`, 4 tests, packet-level proof via `FAKE_ECHO_PACKET`); step 3 =
+  a10 green with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart → adopt, no
+  duplicate, capacity reconciled, flock negative control). Next: step 4
+  (mycelium a14/a15/a16: real `mycelium serve` under `MYCELIUM_CONFIG` → temp store)
 - P4 (Cline/hardening): **not started**
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
@@ -88,14 +90,35 @@ agents do the reasoning.
   enriched with `ctx_limit`/`context_pct`), `api.py` (live context on running attempts in the job view),
   `jobs.py` (`usage` decoded in the job view), `tests/fakes/fake_worker.py` (`high_context` mode +
   `FAKE_USAGE_TOKENS`/`FAKE_CTX_HOLD_S`), `tests/test_u_ctx.py` (+7), `tests/test_i_context_warning.py` (new)
+- P3 step 3 (a10): `tests/test_a10_restart_no_dup.py` (full rewrite: real `dispatcherd`
+  subprocesses — `RealDaemon` + `db_query` WAL-reader helpers; hold-mode worker, flock negative
+  control, SIGKILL mid-job, adoption + no-dup + capacity assertions via `FAKE_LAUNCH_LOG`).
+  Two production fixes found by the test:
+  - `scheduler.py` `_finalize`: a **re-adopted** child (spawned daemon died ⇒ `exit_code=None`,
+    the exit went to init) is now judged by its on-disk result file — a schema-valid report
+    (any outcome) ⇒ `adapter_class=None` so `evaluate_attempt` decides on merits; only with no
+    valid report is it `exit_unknown`. Previously `exit_code=None` was unconditionally
+    `exit_unknown` → terminal failure for a normally-completing adopted worker.
+  - `models.py` `RETRYABLE`: `EXIT_UNKNOWN` is now retryable (crash-like; the process is
+    confirmed dead before finalize, so a retry cannot duplicate execution).
+  - `procfs.py` `scan_marker_processes`: read `/proc/<pid>/stat` **field 4 (ppid)** where it
+    meant **field 5 (pgrp)** — after the spawning daemon dies the worker re-parents to init
+    (ppid=1), so every restart-adoptation looked like PID reuse and was quarantined
+    (`quarantined_pid_reuse`). Now uses `pgid_of` (field 5 = pgrp), stable across re-parenting
+    because the worker is its own group leader (`start_new_session`).
+  - `tests/fakes/fake_worker.py`: `_emit` swallows `BrokenPipeError`/`OSError` — after the
+    supervisor dies the stream pipe's read end is gone; the result contract is file-based
+    (`RESULT_PATH`/`CHECKPOINT_PATH`), so the worker keeps going and the re-adopting daemon
+    takes the result file as the authority.
 - P2 bug fixes: jobs.py PROFILE/BACKEND_UNKNOWN `known=` now serializes ids (was leaking live pydantic
   objects into ApiError → json.dumps crash in `_send`, dropped the connection with no job row); cli
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **85 passed, 4 skipped** (~60s) — skips = a10 (real dispatcherd restart) + a14/a15/a16 (real
-  mycelium subprocess) — all P3-gated
-- Acceptance a01–a09, a11–a13, a17–a20 (18): green with fakes; P2 mcp_adapter (8): green
+- pytest: **86 passed, 3 skipped** (~73s) — skips = a14/a15/a16 (real mycelium subprocess) —
+  all P3 step 4-gated
+- Acceptance a01–a13, a17–a20 (19): green — a10 now with a REAL `dispatcherd` subprocess
+  (~10s: two daemon lifetimes + SIGKILL mid-job); P2 mcp_adapter (8): green
 - P3 step 1: `test_i_context_warning.py` (2 integration: live view + one-shot `context_warning` event +
   durable `usage_json` evidence; below-threshold negative) green
 - P3 step 2: `test_i_crash_recovery.py` (4 integration) green — incl. packet-level assertion that
@@ -115,9 +138,9 @@ agents do the reasoning.
   old daemon — superseded; see the 143 section.
 
 ## Next steps
-1. P3 step 3: a10 — real `dispatcherd` subprocess SIGKILL mid-job → restart → adopt, no duplicate,
-   capacity reconciled (procfs identity `pid+pgid+starttime` + marker scan; a10 currently skips).
-   Then step 4 mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
+1. ~~P3 step 3: a10 — real `dispatcherd` subprocess SIGKILL mid-job → restart → adopt, no
+   duplicate, capacity reconciled~~ ✅ DONE — 19/20 acceptance green.
+2. P3 step 4: mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
    store, user store untouched) + promote; step 5: scope startup_reconcile orphan-kill to own instance
    (see Known footgun). → ALL 20 acceptance green.
-2. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.
+3. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.

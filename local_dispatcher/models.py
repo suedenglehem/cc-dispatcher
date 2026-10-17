@@ -32,7 +32,11 @@ class FailureClass(str, Enum):
     ORPHANED = "orphaned"
 
 
-RETRYABLE = {FailureClass.CONTEXT_OVERFLOW, FailureClass.CRASH, FailureClass.BACKEND_DISCONNECT}
+# EXIT_UNKNOWN (re-adopted child that died without a valid report) is
+# crash-like: the process is confirmed dead before finalize, so a retry in
+# the same worktree cannot duplicate execution.
+RETRYABLE = {FailureClass.CONTEXT_OVERFLOW, FailureClass.CRASH,
+             FailureClass.BACKEND_DISCONNECT, FailureClass.EXIT_UNKNOWN}
 
 
 class ErrorCodes:

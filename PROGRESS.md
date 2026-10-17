@@ -19,11 +19,11 @@
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ⬜ not started |
 
 ## Acceptance tests (PRD §14)
-- **Green with fakes (18):** a01–a09, a11–a13, a17–a20
-- **P3-gated (4, need real subprocesses):** a10 (real `dispatcherd` SIGKILL → adopt, no duplicate),
-  a14/a15/a16 (real `mycelium serve` under `MYCELIUM_CONFIG` → temp store)
+- **Green (19):** a01–a13, a17–a20 — a10 now with a REAL `dispatcherd` subprocess
+  (SIGKILL mid-job → restart → adopt, no duplicate, capacity reconciled, flock negative control)
+- **P3-gated (3, need real `mycelium serve` under `MYCELIUM_CONFIG` → temp store):** a14/a15/a16
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **85 passed, 4 skipped** (skips = the 4 P3-gated above)
+- Suite: **86 passed, 3 skipped** (skips = the 3 P3-gated above)
 
 ## Current milestone: P3 (recovery / restart / memory / failure injection)
 Goal: all 20 acceptance tests green, using real subprocesses.
@@ -52,18 +52,32 @@ Remaining:
 1. ~~stream-json usage tracking + 65% context warning + overflow evidence~~ ✅
 2. ~~checkpoint contract + context-overflow / crash / backend-disconnect recovery~~ ✅
    (a09 = overflow; step 2 = crash / checkpoint-then-crash / backend-disconnect / tests-fail)
-3. procfs startup reconcile + quarantine — a10: real `dispatcherd` SIGKILL mid-job → restart →
-   adopt (no duplicate), capacity reconciled
+3. ~~procfs startup reconcile + quarantine — a10: real `dispatcherd` SIGKILL mid-job → restart →
+   adopt (no duplicate), capacity reconciled~~ ✅ **done (2026-10-17)** —
+   `tests/test_a10_restart_no_dup.py` rewritten as a real-subprocess test: daemon #1 launches a
+   `hold`-mode fake worker, a flock negative control (second daemon must exit 1), daemon #1
+   SIGKILLed (worker survives — own session), daemon #2 on the SAME state dir adopts via
+   `startup_reconcile` (same pid, `re_adopted` event), the adopted worker finishes after its
+   supervisor is gone → on-disk result file is the authority (`exit_code=None` path in
+   `_finalize`, the fix this step) → job succeeds on the SAME attempt; launch log (FAKE_LAUNCH_LOG)
+   is the no-duplication oracle (exactly one start/end pair, stable pid); reservations released +
+   a second job proves the freed slot works. Two bugs found + fixed along the way: (a)
+   re-adopted children finalized as terminal `exit_unknown` despite a valid result — `_finalize`
+   now judges by the on-disk report (mirrors `_finalize_dead_attempt`), and `exit_unknown` is
+   retryable (crash-like; the process is confirmed dead before finalize so a retry cannot
+   duplicate); (b) `scan_marker_processes` read field 4 (ppid) instead of field 5 (pgrp) — after
+   the daemon died the worker re-parents to init (ppid=1), so every restart-adoptation looked
+   like PID reuse and was quarantined. Now uses `pgid_of` (field 5), which is stable across
+   re-parenting because the worker is its own group leader.
 4. mycelium client + packet memory injection + envelope + outage degrade + promote
    (a14/a15/a16; real `mycelium serve` under a temp store, user store untouched)
 5. Hardening: scope `startup_reconcile` orphan-kill to the instance's own db/lock
    (the global `/proc` marker-scan footgun — see HANDOFF.md "Known footgun")
 
-Next unfinished task: P3 step 3 — a10 with a real `dispatcherd` subprocess: SIGKILL mid-job →
-restart → adoption with no duplicate execution, capacity reconciled (procfs identity
-`pid+pgid+starttime` + marker scan). The a10 test currently skips (P3-gated); it needs the
-real-subprocess fixture per the plan's "Process model" note. Then step 4 (mycelium a14/15/16)
-and step 5 (scope the orphan-kill).
+Next unfinished task: P3 step 4 — mycelium (a14/a15/a16) with a real `mycelium serve` subprocess
+under `MYCELIUM_CONFIG` → temp store (user store untouched): worker recalls a primary-saved fact
+(a14), outage degrades or blocks per `memory_required` (a15), shared memory key (a16). Then
+step 5 (scope the orphan-kill).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

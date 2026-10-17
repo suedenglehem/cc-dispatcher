@@ -521,7 +521,18 @@ class Scheduler:
 
         # process-level class (adapter evidence)
         if exit_code is None:
-            adapter_class = FailureClass.EXIT_UNKNOWN.value
+            # Re-adopted child: the daemon that spawned it died, so its exit
+            # code went to init — we only saw the process vanish via procfs.
+            # The on-disk result file is the authority (PRD §14 test 10,
+            # mirroring _finalize_dead_attempt): if the worker left a
+            # schema-valid report, judge it on its merits (completed →
+            # success, failed/blocked/incomplete → their own classes). Only
+            # with no valid report is it exit_unknown, retried like a crash
+            # — the process is confirmed dead, so a retry cannot duplicate.
+            if result_obj is not None and not result_validation:
+                adapter_class = None
+            else:
+                adapter_class = FailureClass.EXIT_UNKNOWN.value
         else:
             adapter_class = adapter.classify(
                 exit_code=exit_code, info=child.info, ctx_limit=ctx_limit,

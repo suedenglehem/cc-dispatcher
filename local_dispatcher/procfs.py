@@ -79,11 +79,12 @@ def scan_marker_processes() -> dict[str, dict]:
         attempt_id = env.get("DISPATCHER_ATTEMPT_ID", "")
         if not attempt_id:
             continue
-        try:
-            with open(f"/proc/{pid}/stat", "rb") as f:
-                data = f.read().decode("ascii", "replace")
-            pgid = int(data[data.rfind(")") + 2:].split()[1])  # field 5
-        except (OSError, ValueError, IndexError):
+        # pgrp (field 5), NOT ppid (field 4): the worker is its own group
+        # leader (start_new_session), so pgrp == pid stays stable across
+        # re-parenting when the spawning daemon dies — that stability is
+        # exactly what identity_matches relies on at restart.
+        pgid = pgid_of(pid)
+        if pgid is None:
             continue
         found[attempt_id] = {"pid": pid, "pgid": pgid, "job_id": env.get("DISPATCHER_JOB_ID", "")}
     return found
