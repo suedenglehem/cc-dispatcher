@@ -58,6 +58,8 @@ class ErrorCodes:
     RESUME_MODE_SINGLE = "resume_mode_single"
     INTEGRATE_JOB_NOT_SUCCEEDED = "integrate_job_not_succeeded"
     INTEGRATE_BAD_COMMIT = "integrate_bad_commit"
+    PROMOTE_NOT_INTEGRATED = "promote_not_integrated"
+    MYCELIUM_UNAVAILABLE = "mycelium_unavailable"
     # backends / projects
     BACKEND_UNKNOWN = "backend_unknown"
     BACKEND_PRIMARY = "backend_primary"
@@ -126,6 +128,11 @@ class IntegrateParams(BaseModel):
 
 
 class ResumeParams(BaseModel):
+    job_id: str
+    project_id: str | None = None
+
+
+class PromoteParams(BaseModel):
     job_id: str
     project_id: str | None = None
 

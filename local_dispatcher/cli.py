@@ -143,6 +143,11 @@ def c_integrate(args) -> int:
     return 0
 
 
+def c_promote(args) -> int:
+    _out(args, _client(args).promote(args.job_id))
+    return 0
+
+
 def c_workers(args) -> int:
     _out(args, _client(args).workers(refresh=args.refresh))
     return 0
@@ -263,6 +268,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("job_id")
     p.add_argument("--commit", required=True)
     p.set_defaults(fn=c_integrate)
+
+    p = sub.add_parser("promote",
+                       help="save the [decision] memory for an accepted job")
+    p.add_argument("job_id")
+    p.set_defaults(fn=c_promote)
 
     p = sub.add_parser("workers", help="worker backend availability")
     p.add_argument("--refresh", action="store_true", help="force probes")

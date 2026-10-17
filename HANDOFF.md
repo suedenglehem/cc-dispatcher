@@ -15,13 +15,16 @@ agents do the reasoning.
 - P2 (MCP + primary UX): **complete** — mcp_adapter 8 tools done+tested, `claude mcp add dispatcher` done,
   full primary↔worker loop demonstrated live (submit → worker runs → primary ff-merges → `ladd integrate`
   accepted → drain to single). Backends restored to safe state. Suite 72 passed / 4 P3-skip.
-- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — steps 1–3
+- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — steps 1–4
   done (2026-10-17): step 1 = live 65% context warning + overflow evidence + both config knobs
   wired; step 2 = crash / checkpoint-then-crash / backend-disconnect / tests-fail recovery e2e
   (`test_i_crash_recovery.py`, 4 tests, packet-level proof via `FAKE_ECHO_PACKET`); step 3 =
   a10 green with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart → adopt, no
-  duplicate, capacity reconciled, flock negative control). Next: step 4
-  (mycelium a14/a15/a16: real `mycelium serve` under `MYCELIUM_CONFIG` → temp store)
+  duplicate, capacity reconciled, flock negative control); step 4 = mycelium client (long-lived
+  stdio child, respawn-once, single-flight, outage-degrade), `ladd promote`, and a14/a15/a16
+  green with a REAL `mycelium serve` under `MYCELIUM_CONFIG` → temp store (user store untouched)
+  — **20/20 acceptance tests green, full suite 89 passed / 0 skipped**. Next: step 5
+  (scope `startup_reconcile` orphan-kill to the instance's own db/lock — see Known footgun)
 - P4 (Cline/hardening): **not started**
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
@@ -71,6 +74,46 @@ agents do the reasoning.
 - **Post-restart ops:** config reasserts on daemon start — after ANY restart, re-release tr4-secondary and
   re-enable i7 if workers should run on them. `pgrep -af local-dispatcher` finds the daemon (not `dispatcherd`).
 
+## Changed files (P3 step 4 — mycelium)
+- `local_dispatcher/mycelium.py` (NEW): `MyceliumClient` — one long-lived `mycelium serve` stdio
+  child; raw newline-JSON-RPC 2.0 (`initialize` → `notifications/initialized` → `tools/call`),
+  responses correlated by id, reader thread + `queue.Queue`; **single-flight** (one in-flight
+  call; future created BEFORE the request is written); **lifetime-1 respawn** (second death ⇒
+  permanently `_unavailable`, no further spawns); `ensure()` is the memory_required gate (lazy
+  client ⇒ `available` snapshot is a trap); `_call` returns None on ANY failure, never raises;
+  `memory_section()` = ≤`max_recall_queries`(3) bounded recalls (limit 5 each) ≤ 4000 chars,
+  partial-OK on mid-section outage; `save()` envelope helper, never raises
+- `local_dispatcher/config.py`: `MyceliumConfig` (command/env/timeouts/caps); **safety
+  property** — `enabled` derived from presence of the `[mycelium]` table (`m = raw.get(...)`
+  with NO default) so an absent section can never spawn a child against the user's real
+  `~/.mycelium`
+- `local_dispatcher/scheduler.py`: memory gate in `_launch_prefilter`
+  (`memory_required` ⇒ `await mycelium.ensure()` else `memory_required_unavailable` →
+  **blocked**); `memory_section` rendered into the packet at render time
+- `local_dispatcher/packets.py`: `MYCELIUM_PROJECT:` + `BASE_COMMIT:` packet lines (fallback
+  `NONE = "(none)"`); `MEMORY_RECALLED` section only when non-empty
+- `local_dispatcher/api.py` + `cli.py` + `jobs.py` + `models.py`: `ladd promote <job>` /
+  `dispatch…promote` (pre-checks succeeded + `integrated_commit`; saves
+  `[decision] … accepted` pinned, confidence 0.9) + error catalog entries
+- `daemon.py`: `sync_projects_from_config` persists `mycelium_project` (restart never loses
+  the project→key mapping; existing rows keep runtime mode)
+- `tests/conftest.py`: full mycelium daemon wiring (`Env.daemon(mycelium=dict|None)` renders
+  `[mycelium]` + `[mycelium.env]` into the temp TOML; `DaemonHandle.mycelium`; close on shutdown)
+- `tests/helpers.py`: `MYCELIUM_BIN` + `make_mycelium_store(root)` — temp TOML whose
+  `[storage]` db/backups AND `[foundry]` log/db all live under the pytest tmp root
+  (foundry is on by default — its paths MUST be overridden or `~/.mycelium` gets written);
+  all three tests `skipif(not exists(MYCELIUM_BIN))`
+- `tests/fakes/fake_worker.py`: parses `MYCELIUM_PROJECT:`/`BASE_COMMIT:` from the packet;
+  new `_mycelium_save_envelope` — stdlib-only sync JSON-RPC session against its own
+  `mycelium serve` child (Popen + reader thread, 20s/call, kill in finally), gated by
+  `FAKE_MYCELIUM_CMD`(JSON argv)+`FAKE_MYCELIUM_CONFIG`(TOML); a failed save is swallowed
+  (PRD §12: memory outage never fails the job)
+- `tests/test_a14_worker_recalls_fact.py` / `test_a15_mycelium_outage.py` /
+  `test_a16_shared_memory_key.py`: rewritten as real-subprocess tests (a15 kills
+  `h.mycelium.pid` with SIGKILL twice — spawn-once + respawn-once makes the 4-job
+  healthy/respawn/degrade/blocked sequence deterministic; a16 runs the daemon WITHOUT a
+  `[mycelium]` section — the worker's own child proves the shared key end-to-end)
+
 ## Changed files (P1 + P2)
 - `local_dispatcher/` full package: config, db(+migrations/0001_init.sql), models, procfs, worktrees,
   backends, packets, results, supervisor, jobs, scheduler (launch gate + startup reconcile),
@@ -115,10 +158,10 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **86 passed, 3 skipped** (~73s) — skips = a14/a15/a16 (real mycelium subprocess) —
-  all P3 step 4-gated
-- Acceptance a01–a13, a17–a20 (19): green — a10 now with a REAL `dispatcherd` subprocess
-  (~10s: two daemon lifetimes + SIGKILL mid-job); P2 mcp_adapter (8): green
+- pytest: **89 passed, 0 skipped** (~79s) — **20/20 acceptance tests green**
+- Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
+  daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
+  (temp store, user `~/.mycelium` untouched — 1.9s / 4.4s / 2.3s); P2 mcp_adapter (8): green
 - P3 step 1: `test_i_context_warning.py` (2 integration: live view + one-shot `context_warning` event +
   durable `usage_json` evidence; below-threshold negative) green
 - P3 step 2: `test_i_crash_recovery.py` (4 integration) green — incl. packet-level assertion that
@@ -140,7 +183,9 @@ agents do the reasoning.
 ## Next steps
 1. ~~P3 step 3: a10 — real `dispatcherd` subprocess SIGKILL mid-job → restart → adopt, no
    duplicate, capacity reconciled~~ ✅ DONE — 19/20 acceptance green.
-2. P3 step 4: mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
-   store, user store untouched) + promote; step 5: scope startup_reconcile orphan-kill to own instance
-   (see Known footgun). → ALL 20 acceptance green.
-3. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.
+2. ~~P3 step 4: mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
+   store, user store untouched) + promote~~ ✅ DONE (2026-10-17) — **ALL 20 acceptance green,
+   suite 89 passed / 0 skipped.**
+3. P3 step 5 (hardening): scope `startup_reconcile` orphan-kill to the instance's own db/lock
+   (see Known footgun — the global `/proc/*/environ` marker scan).
+4. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.

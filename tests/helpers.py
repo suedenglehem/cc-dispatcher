@@ -6,6 +6,31 @@ import json
 import os
 import time
 
+MYCELIUM_BIN = os.path.abspath(
+    os.path.expanduser("~/.venvs/mycelium/bin/mycelium"))
+
+
+def make_mycelium_store(root) -> dict:
+    """Temp mycelium config whose [storage]/[foundry] paths all live under
+    `root` — the user's ~/.mycelium is never touched (a14-a16 isolation).
+    Returns {"cfg", "env", "command"}: a TOML path, the env dict for a
+    daemon [mycelium.env] or worker env_overrides, and the argv to spawn."""
+    root = os.fspath(root)
+    store = os.path.join(root, "mycelium-store")
+    os.makedirs(store, exist_ok=True)
+    cfg_path = os.path.join(store, "mycelium.toml")
+    with open(cfg_path, "w", encoding="utf-8") as f:
+        f.write(
+            "[storage]\n"
+            f'db_path = "{os.path.join(store, "memory.db")}"\n'
+            f'backup_dir = "{os.path.join(store, "backups")}"\n'
+            "[foundry]\n"
+            f'log_dir = "{os.path.join(store, "foundry-logs")}"\n'
+            f'db_path = "{os.path.join(store, "foundry.db")}"\n')
+    return {"cfg": cfg_path,
+            "env": {"MYCELIUM_CONFIG": cfg_path},
+            "command": [MYCELIUM_BIN, "serve"]}
+
 
 def wait_for(cond, timeout: float = 25.0, interval: float = 0.1,
              message: str = "condition"):

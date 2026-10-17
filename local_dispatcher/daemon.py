@@ -21,6 +21,7 @@ from .backends import BackendRegistry
 from .config import load_config
 from .db import Database, now_iso
 from .jobs import Jobs
+from .mycelium import MyceliumClient
 from .scheduler import Scheduler
 from .supervisor import Supervisor
 
@@ -89,7 +90,10 @@ async def serve(cfg) -> None:
         db, cfg, cfg.paths,
         adapter_for=lambda profile_id: get_adapter(
             cfg.profile(profile_id).adapter))
-    scheduler = Scheduler(db, cfg, cfg.paths, backends, supervisor, jobs, None)
+    mycelium = (MyceliumClient(cfg.mycelium)
+                if cfg.mycelium.enabled else None)
+    scheduler = Scheduler(db, cfg, cfg.paths, backends, supervisor, jobs,
+                          mycelium)
 
     loop = asyncio.get_running_loop()
     stop = loop.create_future()
@@ -101,7 +105,7 @@ async def serve(cfg) -> None:
             signal.signal(sig, signal.SIG_DFL)
 
     await scheduler.startup_reconcile()
-    api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends)
+    api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends, mycelium)
     await api.start()
     await scheduler.start()
     log.info("dispatcherd ready (pid %d, socket %s)", os.getpid(),
@@ -119,6 +123,8 @@ async def serve(cfg) -> None:
     log.info("stopping (workers left running; they are re-adopted on restart)")
     await scheduler.stop()
     await api.stop()
+    if mycelium is not None:
+        await mycelium.close()
     os.close(lock_fd)
 
 

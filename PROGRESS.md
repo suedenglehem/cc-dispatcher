@@ -19,15 +19,16 @@
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ⬜ not started |
 
 ## Acceptance tests (PRD §14)
-- **Green (19):** a01–a13, a17–a20 — a10 now with a REAL `dispatcherd` subprocess
-  (SIGKILL mid-job → restart → adopt, no duplicate, capacity reconciled, flock negative control)
-- **P3-gated (3, need real `mycelium serve` under `MYCELIUM_CONFIG` → temp store):** a14/a15/a16
+- **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
+  adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
+  `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **86 passed, 3 skipped** (skips = the 3 P3-gated above)
+- Suite: **89 passed, 0 skipped** (~79s)
 
 ## Current milestone: P3 (recovery / restart / memory / failure injection)
 Goal: all 20 acceptance tests green, using real subprocesses.
-Status: **step 1 done (2026-10-17)** — stream-json usage tracking was already wired
+Status: **steps 1–4 done (2026-10-17), 20/20 acceptance green (89 passed / 0 skipped)**;
+remaining = step 5 (scope the orphan-kill). Step 1 — stream-json usage tracking was already wired
 (`adapter.parse_line` → `StreamInfo.last_context_tokens`); this step made it observable and
 configurable: `results.context_pct()` helper, one-shot per-attempt `context_warning` event from
 the tick (`Scheduler._context_watch`, deduped via `Child.context_warned`), `daemon.context_warn_pct`
@@ -69,15 +70,31 @@ Remaining:
    the daemon died the worker re-parents to init (ppid=1), so every restart-adoptation looked
    like PID reuse and was quarantined. Now uses `pgid_of` (field 5), which is stable across
    re-parenting because the worker is its own group leader.
-4. mycelium client + packet memory injection + envelope + outage degrade + promote
-   (a14/a15/a16; real `mycelium serve` under a temp store, user store untouched)
+4. ~~mycelium client + packet memory injection + envelope + outage degrade + promote~~
+   ✅ **done (2026-10-17)** — new `local_dispatcher/mycelium.py`: `MyceliumClient` = one
+   long-lived `mycelium serve` stdio child (raw newline-JSON-RPC 2.0, single-flight,
+   lifetime-1 respawn — second death ⇒ permanently unavailable; `_call` never raises;
+   `memory_section` = ≤3 bounded recalls ≤4000 chars, partial-OK on mid-section outage;
+   `ensure()` is the `memory_required` gate). Config: `MyceliumConfig` with `enabled` derived
+   from PRESENCE of the `[mycelium]` table (absent section can never spawn against the user's
+   `~/.mycelium`). Scheduler: `memory_required` + client down ⇒ `blocked
+   (memory_required_unavailable)`. `ladd promote` / MCP promote (succeeded + integrated_commit
+   ⇒ pinned `[decision]` save). Fake worker: parses `MYCELIUM_PROJECT:`/`BASE_COMMIT:` and,
+   when `FAKE_MYCELIUM_CMD`/`FAKE_MYCELIUM_CONFIG` are set, saves the `[worker-checkpoint]`
+   envelope through its own stdio child (failed save swallowed). `make_mycelium_store(root)`
+   points ALL mycelium paths (storage db/backups + foundry log/db — foundry is on by default)
+   at the pytest tmp root. a14 = primary-saved fact in the packet (`MEMORY_RECALLED`);
+   a15 = SIGKILL the daemon's child twice: job1 healthy → job2 respawn → job3 degrades (no
+   section, still succeeds) → job4 blocked per `memory_required`; a16 = daemon WITHOUT a
+   `[mycelium]` section (isolation), worker's own child saves under the project key, primary
+   side recalls the job id.
 5. Hardening: scope `startup_reconcile` orphan-kill to the instance's own db/lock
    (the global `/proc` marker-scan footgun — see HANDOFF.md "Known footgun")
 
-Next unfinished task: P3 step 4 — mycelium (a14/a15/a16) with a real `mycelium serve` subprocess
-under `MYCELIUM_CONFIG` → temp store (user store untouched): worker recalls a primary-saved fact
-(a14), outage degrades or blocks per `memory_required` (a15), shared memory key (a16). Then
-step 5 (scope the orphan-kill).
+Next unfinished task: P3 step 5 — scope `startup_reconcile`'s orphan-kill to the instance's
+own db/lock: the global `/proc/*/environ` `DISPATCHER_ATTEMPT_ID` marker scan kills any
+unmatched marker process, so two instances with different state dirs would kill each
+other's workers. Then P4.
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

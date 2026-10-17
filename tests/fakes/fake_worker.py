@@ -14,6 +14,10 @@ Packet echo: when FAKE_ECHO_PACKET is set, the normal (post-mode) path also
 writes the received packet to <artifacts>/echo_packet.txt — lets
 multi-attempt recovery tests inspect what attempt N actually received.
 
+Mycelium: on the normal path, if the packet carries MYCELIUM_PROJECT and
+FAKE_MYCELIUM_CMD/FAKE_MYCELIUM_CONFIG are set, saves a [worker-checkpoint]
+memory via its own stdio `mycelium serve` child (test 16).
+
 Modes:
   normal                 valid result, exit 0
   hold                   sleep FAKE_HOLD_S, then normal (drain/cancel tests)
@@ -141,6 +145,81 @@ def _checkpoint(status: str = "done") -> dict:
     }
 
 
+def _mycelium_save_envelope(project: str, base_commit: str) -> None:
+    """a16: the fake worker saves a [worker-checkpoint] memory through its
+    own stdio `mycelium serve` child — the same contract a real worker uses
+    via the isolated --mcp-config. Gated by FAKE_MYCELIUM_CMD (JSON argv
+    list) + FAKE_MYCELIUM_CONFIG (TOML pointing at a temp store). A failed
+    save is swallowed: a memory outage never fails the job (PRD §12)."""
+    cmd = os.environ.get("FAKE_MYCELIUM_CMD")
+    cfg_path = os.environ.get("FAKE_MYCELIUM_CONFIG")
+    if not (cmd and cfg_path and project):
+        return
+    try:
+        argv = json.loads(cmd)
+    except json.JSONDecodeError:
+        return
+    import queue
+    import threading
+
+    env = dict(os.environ)
+    env["MYCELIUM_CONFIG"] = cfg_path
+    p = None
+    try:
+        p = subprocess.Popen(argv, stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             env=env, text=True)
+
+        def _reader(q: "queue.Queue") -> None:
+            for line in p.stdout:
+                q.put(line)
+
+        q: "queue.Queue" = queue.Queue()
+        threading.Thread(target=_reader, args=(q,), daemon=True).start()
+
+        def _send(obj: dict) -> None:
+            p.stdin.write(json.dumps(obj) + "\n")
+            p.stdin.flush()
+
+        def _wait(timeout: float = 20.0) -> None:
+            try:
+                q.get(timeout=timeout)
+            except queue.Empty:
+                pass
+
+        _send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": {"protocolVersion": "2025-06-18",
+                          "capabilities": {},
+                          "clientInfo": {"name": "fake-worker", "version": "0"}}})
+        _wait()
+        _send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        content = (f"[worker-checkpoint] project={project} "
+                   f"job={os.environ.get('DISPATCHER_JOB_ID', 'j_fake')} "
+                   f"attempt={_attempt_no()} base={base_commit or 'unknown'} "
+                   f"role=worker status=done | done: fake worker finished "
+                   f"changed: none tests: true passed remaining: none next: none")
+        _send({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+               "params": {"name": "save",
+                          "arguments": {"content": content, "project": project}}})
+        _wait()
+    except OSError:
+        pass
+    finally:
+        if p is not None:
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
+            try:
+                p.kill()
+            except OSError:
+                pass
+            try:
+                p.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                pass
+
+
 def main() -> int:
     _log_phase("start")
     try:
@@ -155,11 +234,17 @@ def _run() -> int:
         packet = sys.stdin.read()
 
     result_path = checkpoint_path = None
+    myc_project = base_commit = ""
     for line in packet.splitlines():
         if line.startswith("RESULT_PATH: "):
             result_path = line.split(":", 1)[1].strip()
         elif line.startswith("CHECKPOINT_PATH: "):
             checkpoint_path = line.split(":", 1)[1].strip()
+        elif line.startswith("MYCELIUM_PROJECT: "):
+            v = line.split(":", 1)[1].strip()
+            myc_project = "" if v in ("", "(none)") else v
+        elif line.startswith("BASE_COMMIT: "):
+            base_commit = line.split(":", 1)[1].strip()
 
     job_id = os.environ.get("DISPATCHER_JOB_ID", "j_fake")
     attempt_id = os.environ.get("DISPATCHER_ATTEMPT_ID", "j_fake-a1")
@@ -263,6 +348,8 @@ def _run() -> int:
                                        "echo_env.json"),
                           json.dumps({k: os.environ.get(k) for k in keys}))
 
+    if myc_project:
+        _mycelium_save_envelope(myc_project, base_commit)
     if checkpoint_path:
         _atomic_write(checkpoint_path, json.dumps(_checkpoint()))
     _emit({"type": "result", "subtype": "success", "num_turns": 1})

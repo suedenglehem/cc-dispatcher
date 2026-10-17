@@ -22,7 +22,8 @@ from pydantic import ValidationError
 from .db import Database, now_iso
 from .models import (ApiError, BackendSetParams, CancelParams, ErrorCodes,
                      IntegrateParams, JobRefParams, ProjectAddParams,
-                     ResumeParams, SetModeParams, SubmitParams, WorkersParams)
+                     PromoteParams, ResumeParams, SetModeParams, SubmitParams,
+                     WorkersParams)
 
 log = logging.getLogger("dispatcherd.api")
 
@@ -51,13 +52,15 @@ def _resolve_project(conn, project_id: str | None) -> dict:
 
 
 class ApiServer:
-    def __init__(self, db: Database, cfg, paths, jobs, scheduler, backends):
+    def __init__(self, db: Database, cfg, paths, jobs, scheduler, backends,
+                 mycelium=None):
         self.db = db
         self.cfg = cfg
         self.paths = paths
         self.jobs = jobs
         self.scheduler = scheduler
         self.backends = backends
+        self.mycelium = mycelium
         self._server: asyncio.base_events.UnixServer | None = None
 
     async def start(self) -> None:
@@ -130,6 +133,7 @@ class ApiServer:
             "cancel": self._m_cancel,
             "resume": self._m_resume,
             "integrate": self._m_integrate,
+            "promote": self._m_promote,
             "workers": self._m_workers,
             "reconcile": self._m_reconcile,
             "backend_list": self._m_backend_list,
@@ -239,6 +243,28 @@ class ApiServer:
     async def _m_integrate(self, p: dict) -> dict:
         params = IntegrateParams(**p)
         return await self.jobs.integrate(params.job_id, params.commit, params.project_id)
+
+    async def _m_promote(self, p: dict) -> dict:
+        """Record the accepted decision as a pinned Mycelium memory (PRD §12).
+        The primary calls this after acceptance + integrate; the daemon is
+        the only component that can reach the memory store."""
+        params = PromoteParams(**p)
+        view = self.jobs.promote(params.job_id, params.project_id)
+        if self.mycelium is None:
+            raise ApiError(ErrorCodes.MYCELIUM_UNAVAILABLE,
+                           "daemon has no mycelium configured "
+                           "(missing [mycelium] section)")
+        content = (f"[decision] project={view['mycelium_project']} "
+                   f"job={view['job_id']} base={view['base_commit']} | "
+                   f"accepted: {view['summary'] or 'worker work accepted'} "
+                   f"(commit {view['integrated_commit']})")
+        ok = await self.mycelium.save(content, project=view["mycelium_project"],
+                                      pinned=True, confidence=0.9)
+        if not ok:
+            raise ApiError(ErrorCodes.MYCELIUM_UNAVAILABLE,
+                           "mycelium save failed (outage) — the decision was "
+                           "not recorded; retry `ladd promote`")
+        return view
 
     async def _m_workers(self, p: dict) -> dict:
         params = WorkersParams(**p)
@@ -452,6 +478,9 @@ class ApiClient:
                   project_id: str | None = None) -> dict:
         return self.call("integrate", job_id=job_id, commit=commit,
                          project_id=project_id)
+
+    def promote(self, job_id: str, project_id: str | None = None) -> dict:
+        return self.call("promote", job_id=job_id, project_id=project_id)
 
     def workers(self, refresh: bool = False) -> dict:
         return self.call("workers", refresh=refresh)

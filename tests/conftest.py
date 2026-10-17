@@ -31,6 +31,7 @@ from local_dispatcher.config import load_config
 from local_dispatcher.daemon import sync_projects_from_config, worker_policy_text
 from local_dispatcher.db import Database
 from local_dispatcher.jobs import Jobs
+from local_dispatcher.mycelium import MyceliumClient
 from local_dispatcher.scheduler import Scheduler
 from local_dispatcher.supervisor import Supervisor
 
@@ -113,6 +114,11 @@ class DaemonHandle:
     def api(self) -> ApiServer:
         return self.state["api"]
 
+    @property
+    def mycelium(self):
+        """The daemon's MyceliumClient (None when [mycelium] is absent)."""
+        return self.state.get("mycelium")
+
     def client(self) -> ApiClient:
         return ApiClient(self.cfg.paths.socket_path)
 
@@ -156,11 +162,14 @@ def _daemon_body(cfg, state: dict, stop_event: threading.Event,
         supervisor = Supervisor(
             db, cfg, cfg.paths,
             adapter_for=lambda pid: get_adapter(cfg.profile(pid).adapter))
-        scheduler = Scheduler(db, cfg, cfg.paths, backends, supervisor, jobs, None)
+        mycelium = (MyceliumClient(cfg.mycelium)
+                    if cfg.mycelium.enabled else None)
+        scheduler = Scheduler(db, cfg, cfg.paths, backends, supervisor, jobs,
+                              mycelium)
         state.update(db=db, backends=backends, jobs=jobs, supervisor=supervisor,
-                     scheduler=scheduler)
+                     scheduler=scheduler, mycelium=mycelium)
         await scheduler.startup_reconcile()
-        api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends)
+        api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends, mycelium)
         await api.start()
         state.update(api=api)
         await scheduler.start()
@@ -174,6 +183,8 @@ def _daemon_body(cfg, state: dict, stop_event: threading.Event,
         await asyncio.get_running_loop().run_in_executor(None, stop_event.wait)
         await scheduler.stop()
         await api.stop()
+        if mycelium is not None:
+            await mycelium.close()
 
     try:
         asyncio.run(serve())
@@ -223,7 +234,8 @@ class Env:
     # daemon ----------------------------------------------------------------------
 
     def daemon(self, backends=None, profiles=None, projects=None,
-               groups=(), worker_mode: str = "normal") -> DaemonHandle:
+               groups=(), worker_mode: str = "normal",
+               mycelium: dict | None = None) -> DaemonHandle:
         """Build config + start the in-process daemon; return the handle.
 
         backends: list of specs from Env.backend() (default: all started)
@@ -248,7 +260,8 @@ class Env:
             p["env_overrides"] = ov
         projects = projects if projects is not None else [self.project()]
 
-        cfg = load_config(self._write_toml(specs, groups, profiles, projects))
+        cfg = load_config(self._write_toml(specs, groups, profiles, projects,
+                                           mycelium))
         stop_event = threading.Event()
         ready = threading.Event()
         errors: list = []
@@ -264,7 +277,8 @@ class Env:
         self._handles.append(handle)
         return handle
 
-    def _write_toml(self, backends, groups, profiles, projects) -> Path:
+    def _write_toml(self, backends, groups, profiles, projects,
+                    mycelium: dict | None = None) -> Path:
         L: list[str] = []
         L += ["[state]",
               f"root = {json.dumps(str(self.root))}",
@@ -287,6 +301,14 @@ class Env:
               'anthropic_api_key = "local"',
               "permission_mode = \"bypassPermissions\"",
               ""]
+        if mycelium is not None:
+            L += ["[mycelium]",
+                  f"command = {json.dumps(mycelium['command'])}"]
+            if mycelium.get("env"):
+                L.append("[mycelium.env]")
+                for k, v in mycelium["env"].items():
+                    L.append(f"{k} = {json.dumps(v)}")
+            L.append("")
         for g in groups:
             L += ["[[resource_groups]]",
                   f"id = {json.dumps(g['id'])}",

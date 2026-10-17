@@ -216,6 +216,39 @@ class Jobs:
         self.db.event("job", job_id, "integrated", {"commit": full})
         return self.job_view(job_id)
 
+    def promote(self, job_id: str, project_id: str | None = None) -> dict:
+        """Pre-checks for the `ladd promote` API call (PRD §12): the job
+        must be succeeded AND integrated — promotion records the accepted
+        decision, so the primary's merge must already be on record. Returns
+        the fields the daemon needs to write the [decision] memory."""
+        conn = self.db.conn
+        job = self._job(conn, job_id, project_id)
+        if job["status"] != "succeeded":
+            raise ApiError(ErrorCodes.INTEGRATE_JOB_NOT_SUCCEEDED,
+                           f"job {job_id} is {job['status']}; only succeeded "
+                           "jobs can be promoted")
+        if not job["integrated_commit"]:
+            raise ApiError(ErrorCodes.PROMOTE_NOT_INTEGRATED,
+                           f"job {job_id} has no integrated_commit; run "
+                           f"`ladd integrate {job_id} --commit <sha>` first "
+                           "(the primary is the integration authority)")
+        project = dict(conn.execute(
+            "SELECT * FROM projects WHERE id=?", (job["project_id"],)).fetchone())
+        summary = ""
+        try:
+            summary = str(json.loads(job["result_json"] or "{}").get("summary") or "")
+        except json.JSONDecodeError:
+            pass
+        return {
+            "job_id": job_id,
+            "integrated_commit": job["integrated_commit"],
+            "base_commit": job["base_commit"],
+            "summary": summary[:200],
+            "mycelium_project": (job["mycelium_project"]
+                                 or project["mycelium_project"]
+                                 or project["id"]),
+        }
+
     # -- views ---------------------------------------------------------------------
     @staticmethod
     def _job(conn, job_id: str, project_id: str | None) -> dict:

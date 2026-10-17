@@ -106,6 +106,10 @@ class MyceliumConfig:
     max_recall_queries: int = 3
     recall_limit: int = 5
     memory_section_cap_chars: int = 4000
+    # Derived from the presence of the [mycelium] table (not a TOML key):
+    # absent section ⇒ no daemon-side mycelium client at all, so nothing
+    # can ever spawn against the user's store by accident.
+    enabled: bool = False
 
 
 @dataclass
@@ -233,8 +237,15 @@ def load_config(path: str | Path | None = None) -> Config:
     w = raw.get("worker", {})
     worker = WorkerConfig(**{k: v for k, v in w.items() if k in WorkerConfig.__dataclass_fields__})
 
-    m = raw.get("mycelium", {})
-    mycelium = MyceliumConfig(**{k: v for k, v in m.items() if k in MyceliumConfig.__dataclass_fields__})
+    # Presence of the [mycelium] table — not a TOML key — is what enables the
+    # daemon-side client. raw.get("mycelium", {}) would hand back {} when the
+    # section is absent and `is not None` would then be True, silently
+    # spawning a mycelium child against the user's real store in every test.
+    m = raw.get("mycelium")
+    mycelium = MyceliumConfig(
+        **{k: v for k, v in (m or {}).items()
+           if k in MyceliumConfig.__dataclass_fields__ and k != "enabled"},
+        enabled=m is not None)
 
     def _backend(b: dict) -> BackendConfig:
         if not b.get("id") or not b.get("endpoint"):

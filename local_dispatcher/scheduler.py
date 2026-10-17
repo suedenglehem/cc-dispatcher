@@ -73,10 +73,13 @@ class Scheduler:
         self._tick_task: asyncio.Task | None = None
         self._last_prune = 0.0
         from .adapters.claude import mycelium_mcp_json
-        try:
-            self._mcp_json: str = mycelium_mcp_json(cfg)
-        except Exception:
-            self._mcp_json = "{}"
+        if not cfg.mycelium.enabled:
+            self._mcp_json = "{}"  # workers get no mycelium MCP server
+        else:
+            try:
+                self._mcp_json: str = mycelium_mcp_json(cfg)
+            except Exception:
+                self._mcp_json = "{}"
 
     # -- lifecycle -------------------------------------------------------------
     async def start(self) -> None:
@@ -215,9 +218,12 @@ class Scheduler:
             if head is None or not await is_ancestor(
                     project["repo_path"], job["base_commit"], head):
                 return "base_diverged"
-        if job["memory_required"] and self.mycelium is not None \
-                and not self.mycelium.available:
-            return "memory_required_unavailable"
+        if job["memory_required"]:
+            # ensure() (not the `available` snapshot) is the gate: the client
+            # is lazy, so a memory_required job must not launch on a spawn
+            # that hasn't been proven yet (PRD §12: block if unavailable).
+            if self.mycelium is None or not await self.mycelium.ensure():
+                return "memory_required_unavailable"
         remaining = _remaining_s(job["deadline_expires_at"])
         if remaining is not None and remaining < self.cfg.daemon.min_start_budget_s:
             return "deadline_before_start"
