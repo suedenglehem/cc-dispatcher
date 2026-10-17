@@ -174,11 +174,13 @@ Two bugs found + fixed during the live smokes (both regression-tested, suite 96�
 
 All gated P4 work is DONE — both live smokes passed (ak Claude Code `j_1bd3187818`;
 Cline `j_bba5405826`), backends re-secured (tr4-secondary reserved, ak disabled).
-Next unfinished task: housekeeping only — prune the stale worktrees under
-`~/.local/share/local-dispatcher/worktrees/` (now ~14, incl. `j_bba5405826`) from
-demo jobs and the `/tmp/cline-seed-test*` + `/tmp/cline-cc-test` scratch dirs;
-optional: decide whether demo smoke results (`triple` etc.) should be integrated
-into demo-repo main (left unmerged by design).
+Housekeeping **DONE (2026-10-17):** all 18 stale demo worktrees removed (verified no
+active jobs/attempts first; `worktrees/` now empty), `/tmp/cline-seed-test*` +
+`/tmp/cline-cc-test` scratch dirs deleted; the 21 `dispatch/*` branches kept for
+possible integration (diffs also in `artifacts/<job>/attempt-1/diff.patch`);
+artifacts intact (7MB). Next unfinished task: none — the only open item is the
+user's call on integrating demo smoke results (`triple` etc.) into demo-repo main
+(left unmerged by design).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

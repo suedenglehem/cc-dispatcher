@@ -354,5 +354,10 @@ agents do the reasoning.
    recorded verbatim in `docs/cline-status.md`; tr4-secondary re-reserved immediately
    after. Backends re-secured to safe defaults (tr4-secondary reserved, ak disabled).
    **Suite 104 passed / 0 skipped** (the 102 + 2 new ccline-wrapper tests).
-5. Housekeeping (deferred): ~13 stale worktrees under
-   `~/.local/share/local-dispatcher/worktrees/`; `/tmp/cline-seed-test*` scratch dirs.
+5. Housekeeping — **DONE (2026-10-17):** all 18 stale demo worktrees removed
+   (verified no active jobs/attempts first; `worktrees/` now empty), `/tmp/cline-seed-test*`
+   + `/tmp/cline-cc-test` scratch dirs deleted; 3 stale `/tmp/ladd-e2e` registry entries
+   pruned. The 21 `dispatch/*` branches were KEPT (integration still possible — results
+   also live in `artifacts/<job>/attempt-1/diff.patch`); artifacts intact (7MB).
+   Remaining open item (user's call): whether to integrate the demo smoke results
+   (triple/cube/is_even) into demo-repo main — left unmerged by design.
