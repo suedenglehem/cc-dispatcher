@@ -164,8 +164,9 @@ def c_backend_set(args) -> int:
         kw["enabled"] = args.action == "enable"
     if args.action in ("reserve", "release"):
         kw["reserved"] = args.action == "reserve"
-        if args.note:
-            kw["note"] = args.note
+        note = getattr(args, "note", "")
+        if note:
+            kw["note"] = note
     _out(args, _client(args).backend_set(args.backend_id, **kw))
     return 0
 
@@ -173,12 +174,12 @@ def c_backend_set(args) -> int:
 def c_backend_check(args) -> int:
     """Force a probe, then show that backend's row + worker state."""
     c = _client(args)
-    c.workers(refresh=True)
+    w = c.workers(refresh=True)
     r = c.backend_list()
     row = next((b for b in r["backends"] if b["id"] == args.backend_id), None)
     if row is None:
         raise ApiError("backend_unknown", f"unknown backend {args.backend_id!r}")
-    _out(args, {"backend": row, "workers": r.get("workers", [])})
+    _out(args, {"backend": row, "workers": w["workers"]})
     return 0
 
 

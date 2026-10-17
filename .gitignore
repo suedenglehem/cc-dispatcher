@@ -1,5 +1,6 @@
 .venv/
 __pycache__/
+.resume
 *.pyc
 .pytest_cache/
 demo-repo/

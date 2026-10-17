@@ -58,14 +58,14 @@ class Jobs:
         profile_id = params.profile_id
         prof = self.cfg.profile(profile_id)
         if prof is None:
-            known = [p for p in self.cfg.profiles]
+            known = [p.id for p in self.cfg.profiles]
             raise ApiError(ErrorCodes.PROFILE_UNKNOWN,
                            f"unknown profile {profile_id!r}", known=known)
 
         if params.backend_id:
             b = self.cfg.backend(params.backend_id)
             if b is None:
-                known = [x for x in self.cfg.backends]
+                known = [x.id for x in self.cfg.backends]
                 raise ApiError(ErrorCodes.BACKEND_UNKNOWN,
                                f"unknown backend {params.backend_id!r}", known=known)
             if b.is_primary:

@@ -9,7 +9,9 @@ from types import SimpleNamespace
 import pytest
 
 from local_dispatcher.api import ApiServer
+from local_dispatcher.config import BackendConfig, Config, ProfileConfig
 from local_dispatcher.db import Database
+from local_dispatcher.jobs import Jobs
 from local_dispatcher.models import ApiError
 from local_dispatcher import procfs
 
@@ -138,3 +140,60 @@ def test_shape_keeps_json_valid_after_redaction(db):
     srv = _api_server(db)
     out = srv._shape({"items": [{"k": "tok-0123456789"}]})
     assert out["items"][0]["k"] == "[REDACTED]"
+
+
+def _submit_api_server(db: Database) -> ApiServer:
+    """An ApiServer wired to a real Jobs + Config whose `profiles`/`backends`
+    are live pydantic/dataclass objects — the exact shape that used to leak a
+    non-serializable object into an ApiError `known=` list and crash _send."""
+    cfg = Config(
+        paths=SimpleNamespace(), daemon=SimpleNamespace(response_cap_chars=8000),
+        worker=SimpleNamespace(), mycelium=SimpleNamespace(),
+        backends=[BackendConfig(id="b1", endpoint="http://x")], groups=[],
+        profiles=[ProfileConfig(id="good-profile")], projects=[])
+    jobs = Jobs(db, cfg, SimpleNamespace(), "worker policy")
+    srv = object.__new__(ApiServer)
+    srv.db = db
+    srv.cfg = cfg
+    srv.jobs = jobs
+    return srv
+
+
+def _submit_params(profile_id, backend_id=None):
+    p = {"project_id": "demo", "objective": "x",
+         "base_commit": "abcdef0123456789abcdef0123456789abcdef01",
+         "allowed_scope": ["src/"], "profile_id": profile_id}
+    if backend_id is not None:
+        p["backend_id"] = backend_id
+    return p
+
+
+async def test_submit_unknown_profile_error_is_json_serializable(db):
+    # Regression: PROFILE_UNKNOWN used to pass live ProfileConfig objects in
+    # `known=`, so the ApiError response crashed json.dumps in _send and the
+    # connection was dropped with no reply (daemon survived, no job row).
+    db.execute("INSERT INTO projects (id, repo_path, integration_path, mode) "
+               "VALUES ('demo', '/tmp/x', '', 'team')")
+    srv = _submit_api_server(db)
+    resp = await srv._dispatch({"method": "submit",
+                                "params": _submit_params("nope")})
+    wire = json.dumps(resp)  # this is the line that used to raise TypeError
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "profile_unknown"
+    known = resp["error"]["detail"]["known"]
+    assert known == ["good-profile"]
+    assert "good-profile" in wire
+
+
+async def test_submit_unknown_backend_error_is_json_serializable(db):
+    # Same class of bug on the BACKEND_UNKNOWN branch (live BackendConfig objs).
+    db.execute("INSERT INTO projects (id, repo_path, integration_path, mode) "
+               "VALUES ('demo', '/tmp/x', '', 'team')")
+    srv = _submit_api_server(db)
+    resp = await srv._dispatch({"method": "submit",
+                                "params": _submit_params("good-profile",
+                                                         "nope-backend")})
+    json.dumps(resp)
+    assert resp["ok"] is False
+    assert resp["error"]["code"] == "backend_unknown"
+    assert resp["error"]["detail"]["known"] == ["b1"]

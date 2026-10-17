@@ -281,6 +281,14 @@ class ApiServer:
             c.execute("UPDATE backends SET enabled=?, manually_reserved=?, "
                       "reserved_note=? WHERE id=?",
                       (1 if enabled else 0, reserved, note or None, params.backend_id))
+        # pick_backend/worker_availability gate on the in-memory config, not
+        # the DB row — keep the two in lockstep or runtime changes would need
+        # a daemon restart to take effect (config still reasserts on start).
+        b = self.cfg.backend(params.backend_id)
+        if b is not None:
+            b.enabled = bool(enabled)
+            b.manually_reserved = bool(reserved)
+            b.reserved_note = note or None
         self.db.event("backend", params.backend_id,
                       "backend_modified",
                       {"enabled": enabled, "reserved": bool(reserved)})

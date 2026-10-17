@@ -97,6 +97,9 @@ notes = "second interactive Claude session; enable only when free"
 [[profiles]]
 id = "cc-worker"
 adapter = "claude"
+# claude 2.1.30x sends reasoning_effort=high by default; the local
+# vLLM server accepts only xhigh/medium/low, so pin the effort here.
+args = ["--effort", "xhigh"]
 backend_ids = ["tr4-secondary", "i7"]
 deadline_s = 1800
 max_attempts = 2

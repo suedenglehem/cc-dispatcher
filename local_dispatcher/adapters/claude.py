@@ -34,6 +34,8 @@ class ClaudeAdapter(WorkerAdapter):
         cmd = [
             exe, "-p",
             "--output-format", w.output_format,
+            # claude 2.1.301: print mode rejects stream-json without --verbose
+            *(["--verbose"] if w.output_format == "stream-json" else []),
             "--permission-mode", w.permission_mode,
             "--permission-prompts", "none",
             "--mcp-config", mycelium_mcp_json,
