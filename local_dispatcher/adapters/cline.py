@@ -46,6 +46,8 @@ class ClineAdapter(WorkerAdapter):
             "DISPATCHER": "1",
             "DISPATCHER_JOB_ID": job["id"],
             "DISPATCHER_ATTEMPT_ID": job["id"] + f"-a{attempt_no}",
+            # which instance spawned us (see adapters/claude.py)
+            "DISPATCHER_STATE_DIR": cfg.paths.root,
         })
         env.update(json.loads(profile_row.get("env_overrides") or "{}"))
         return WorkerLaunch(cmd=cmd, env=env, cwd=worktree, packet=packet)

@@ -15,7 +15,7 @@
 | P1 | Core daemon + `ladd` CLI; e2e on scratch `demo-repo` | ✅ done |
 | P1 | Real-model smoke (real claude worker on a freed backend) | ✅ done |
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
-| P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | 🔶 in progress |
+| P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ⬜ not started |
 
 ## Acceptance tests (PRD §14)
@@ -23,12 +23,12 @@
   adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
   `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **89 passed, 0 skipped** (~79s)
+- Suite: **92 passed, 0 skipped** (~92s)
 
 ## Current milestone: P3 (recovery / restart / memory / failure injection)
 Goal: all 20 acceptance tests green, using real subprocesses.
-Status: **steps 1–4 done (2026-10-17), 20/20 acceptance green (89 passed / 0 skipped)**;
-remaining = step 5 (scope the orphan-kill). Step 1 — stream-json usage tracking was already wired
+Status: **ALL 5 STEPS DONE (2026-10-17) — 20/20 acceptance green, 92 passed / 0 skipped**.
+Step 1 — stream-json usage tracking was already wired
 (`adapter.parse_line` → `StreamInfo.last_context_tokens`); this step made it observable and
 configurable: `results.context_pct()` helper, one-shot per-attempt `context_warning` event from
 the tick (`Scheduler._context_watch`, deduped via `Child.context_warned`), `daemon.context_warn_pct`
@@ -88,13 +88,21 @@ Remaining:
    section, still succeeds) → job4 blocked per `memory_required`; a16 = daemon WITHOUT a
    `[mycelium]` section (isolation), worker's own child saves under the project key, primary
    side recalls the job id.
-5. Hardening: scope `startup_reconcile` orphan-kill to the instance's own db/lock
-   (the global `/proc` marker-scan footgun — see HANDOFF.md "Known footgun")
+5. ~~Hardening: scope `startup_reconcile` orphan-kill to the instance's own db/lock~~ ✅
+   **done (2026-10-17)** — workers tagged `DISPATCHER_STATE_DIR=<state dir>` (both adapters);
+   `scan_marker_processes()` reports the tag (stays global/DB-agnostic); pure
+   `marker_owned(state_dir, own_state_dir, attempt_in_db)` decides — own iff tag matches, or
+   legacy untagged worker whose attempt row is in the OWN db (rows never deleted); the
+   orphan-kill applies to own markers only; foreign markers get a `foreign_marker_ignored`
+   event and are NEVER killed. Tests: `test_u_marker_scope.py` (2: truth table +
+   real-process scan tag) + `test_i_orphan_scope.py` (1: two REAL daemons, different state
+   dirs — foreign worker survives startup + kill grace, no `orphan_killed`, owner's job
+   still succeeds). `Env._write_toml(root=...)` for the second state dir. Suite 92 passed /
+   0 skipped (~92s).
 
-Next unfinished task: P3 step 5 — scope `startup_reconcile`'s orphan-kill to the instance's
-own db/lock: the global `/proc/*/environ` `DISPATCHER_ATTEMPT_ID` marker scan kills any
-unmatched marker process, so two instances with different state dirs would kill each
-other's workers. Then P4.
+Next unfinished task: P4 — Cline smoke (pass or documented exact failure in
+`docs/cline-status.md`, never faked), resource-group demo, full docs + install.sh; i7
+backend enable gated on the user freeing it (+ 1-token `ladd backend check` for label case).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

@@ -67,6 +67,10 @@ class ClaudeAdapter(WorkerAdapter):
             "DISPATCHER": "1",
             "DISPATCHER_JOB_ID": job["id"],
             "DISPATCHER_ATTEMPT_ID": job["id"] + f"-a{attempt_no}",
+            # which instance spawned us — lets a restarted (or other)
+            # instance's startup_reconcile tell our workers apart from
+            # foreign ones (the marker scan is global, the orphan-kill is not)
+            "DISPATCHER_STATE_DIR": cfg.paths.root,
         })
         if ctx_limit:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(ctx_limit)

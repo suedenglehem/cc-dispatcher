@@ -66,7 +66,11 @@ def read_environ(pid: int) -> dict[str, str] | None:
 def scan_marker_processes() -> dict[str, dict]:
     """Find live processes carrying DISPATCHER_ATTEMPT_ID.
 
-    Returns {attempt_id: {"pid": pid, "pgid": pgid, "job_id": str}}.
+    Returns {attempt_id: {"pid": pid, "pgid": pgid, "job_id": str,
+    "state_dir": str}}. ``state_dir`` is the DISPATCHER_STATE_DIR env tag
+    (the instance that spawned the worker); it is "" for legacy workers
+    spawned before that tag existed. The scan is GLOBAL (all of /proc) —
+    ownership is decided by the caller, which knows its own state dir.
     """
     found: dict[str, dict] = {}
     for entry in os.listdir("/proc"):
@@ -86,7 +90,11 @@ def scan_marker_processes() -> dict[str, dict]:
         pgid = pgid_of(pid)
         if pgid is None:
             continue
-        found[attempt_id] = {"pid": pid, "pgid": pgid, "job_id": env.get("DISPATCHER_JOB_ID", "")}
+        found[attempt_id] = {
+            "pid": pid, "pgid": pgid,
+            "job_id": env.get("DISPATCHER_JOB_ID", ""),
+            "state_dir": env.get("DISPATCHER_STATE_DIR", ""),
+        }
     return found
 
 

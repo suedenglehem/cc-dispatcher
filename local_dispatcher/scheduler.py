@@ -48,6 +48,22 @@ def _iso_to_dt(s: str) -> datetime:
     return datetime.strptime(s, "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
 
 
+def marker_owned(state_dir: str, own_state_dir: str,
+                 attempt_in_db: bool) -> bool:
+    """Does a live marker process belong to this instance?
+
+    The marker scan is global (/proc), but ownership is per-instance:
+    a tagged worker is ours iff its DISPATCHER_STATE_DIR is OUR state
+    dir; an untagged (legacy, pre-upgrade) worker is ours only if its
+    attempt row exists in OUR db (attempt rows are never deleted, so a
+    same-instance worker always has one). Anything else belongs to a
+    different instance and must never be killed by us.
+    """
+    if state_dir:
+        return state_dir == own_state_dir
+    return attempt_in_db
+
+
 def _remaining_s(expires_at: str | None) -> float | None:
     if not expires_at:
         return None
@@ -815,10 +831,21 @@ class Scheduler:
             else:
                 await self._finalize_dead_attempt(a, job)
                 finalized += 1
-        # marker processes with no open attempt: the daemon was down while they
-        # ran — there is no other owner, so stop them.
+        # marker processes with no open attempt here: if one is this
+        # instance's own, the daemon was down while it ran and there is no
+        # other owner — stop it. A marker tagged for a DIFFERENT state dir
+        # belongs to another instance: record it and leave it alone (the
+        # /proc scan is global, but the orphan-kill must be scoped to this
+        # instance's db — two instances must not kill each other's workers).
+        foreign_ignored = 0
         for attempt_id, m in markers.items():
             if attempt_id in seen:
+                continue
+            if not self._marker_owned(attempt_id, m.get("state_dir", "")):
+                self.db.event("attempt", attempt_id, "foreign_marker_ignored",
+                              {"pid": m["pid"], "pgid": m["pgid"],
+                               "state_dir": m.get("state_dir", "")})
+                foreign_ignored += 1
                 continue
             if group_alive(m["pgid"]):
                 kill_group(m["pgid"], signal.SIGTERM)
@@ -830,7 +857,16 @@ class Scheduler:
             self.db.event("attempt", attempt_id, "orphan_killed",
                           {"pid": m["pid"], "pgid": m["pgid"]})
         return {"adopted": adopted, "finalized": finalized,
-                "quarantined": quarantined}
+                "quarantined": quarantined, "foreign_ignored": foreign_ignored}
+
+    def _marker_owned(self, attempt_id: str, state_dir: str) -> bool:
+        """Ownership of a live marker process (see marker_owned). The
+        legacy fallback — no DISPATCHER_STATE_DIR tag — is own only when
+        the attempt row exists in this instance's db."""
+        return marker_owned(
+            state_dir, self.cfg.paths.root,
+            self.db.query_one("SELECT 1 FROM attempts WHERE id=?",
+                              (attempt_id,)) is not None)
 
     async def _finalize_dead_attempt(self, a: dict, job: dict) -> None:
         """Open attempt whose process is gone (or never spawned). A valid

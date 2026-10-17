@@ -23,8 +23,10 @@ agents do the reasoning.
   duplicate, capacity reconciled, flock negative control); step 4 = mycelium client (long-lived
   stdio child, respawn-once, single-flight, outage-degrade), `ladd promote`, and a14/a15/a16
   green with a REAL `mycelium serve` under `MYCELIUM_CONFIG` → temp store (user store untouched)
-  — **20/20 acceptance tests green, full suite 89 passed / 0 skipped**. Next: step 5
-  (scope `startup_reconcile` orphan-kill to the instance's own db/lock — see Known footgun)
+  — **20/20 acceptance tests green**. Step 5 (hardening) done: the
+  `startup_reconcile` orphan-kill is scoped to the instance's own state dir
+  (`DISPATCHER_STATE_DIR` worker tag; foreign markers recorded, never killed) —
+  **full suite 92 passed / 0 skipped**
 - P4 (Cline/hardening): **not started**
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
@@ -43,12 +45,16 @@ agents do the reasoning.
   the affected backend, read `si_pid`/`si_code` from the wrap log. Daemon logs kept at `/tmp/ladd-real/daemon.log`
   (old, has the deaths) + `daemon2.log` (new).
 
-## Known footgun (harden in P3)
+## Known footgun — RESOLVED in P3 step 5 (2026-10-17)
 - `scheduler.startup_reconcile` scans ALL of `/proc/*/environ` for the `DISPATCHER_ATTEMPT_ID` marker and
-  kills any unmatched marker process group. Two dispatcher instances with DIFFERENT state dirs (different
-  DBs) would each see the other's workers as orphans and kill them. Scope the orphan-kill to the instance's
-  own db/lock (flock already guarantees one per state dir, but the marker scan is global). Not the 143 cause
-  (no second instance was running) — a latent safety issue for future multi-instance use.
+  used to kill ANY unmatched marker process group. Two dispatcher instances with DIFFERENT state dirs
+  (different DBs) would each see the other's workers as orphans and kill them. Fixed: workers are tagged
+  `DISPATCHER_STATE_DIR=<state dir>` by both adapters; `scan_marker_processes()` reports the tag (scan
+  stays global/DB-agnostic); the orphan-kill applies only to OWN markers (tag match, or legacy untagged
+  worker whose attempt row is in the own DB — attempt rows are never deleted); foreign markers get a
+  `foreign_marker_ignored` event and are never killed. Proven by `test_i_orphan_scope.py` (two real
+  daemons, different state dirs, foreign worker survives) + `test_u_marker_scope.py` (truth table).
+  (Was not the 143 cause — no second instance was running then.)
 
 ## Key decisions (final, per plan)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist
@@ -73,6 +79,24 @@ agents do the reasoning.
 - **Never read/echo `~/.cline/data`** (provider secret). Never touch the two interactive sessions.
 - **Post-restart ops:** config reasserts on daemon start — after ANY restart, re-release tr4-secondary and
   re-enable i7 if workers should run on them. `pgrep -af local-dispatcher` finds the daemon (not `dispatcherd`).
+
+## Changed files (P3 step 5 — orphan-kill scoping)
+- `local_dispatcher/adapters/{claude,cline}.py`: worker env gains
+  `DISPATCHER_STATE_DIR=<instance state dir>` (the ownership tag)
+- `local_dispatcher/procfs.py`: `scan_marker_processes()` reports `state_dir`
+  per marker (`""` for legacy untagged workers); scan stays global + DB-agnostic
+- `local_dispatcher/scheduler.py`: pure `marker_owned(state_dir, own_state_dir,
+  attempt_in_db)` + `Scheduler._marker_owned` (legacy fallback = attempt row in
+  the OWN db); `startup_reconcile` orphan-kill now only kills OWN unmatched
+  markers, records `foreign_marker_ignored` (detail: pid/pgid/state_dir) for
+  foreign ones; return gains a `foreign_ignored` key
+- `tests/conftest.py`: `Env._write_toml(root=...)` override for a second state dir
+- `tests/test_u_marker_scope.py` (NEW, 2): marker_owned truth table; real-process
+  scan reports the state_dir tag (and `""` for legacy)
+- `tests/test_i_orphan_scope.py` (NEW, 1): two REAL dispatcherd instances on
+  different state dirs, same repo/backend — the foreign instance's worker
+  survives the other's startup + kill grace, `foreign_marker_ignored` lands in
+  the other's events, no `orphan_killed`, and the owner's job still succeeds
 
 ## Changed files (P3 step 4 — mycelium)
 - `local_dispatcher/mycelium.py` (NEW): `MyceliumClient` — one long-lived `mycelium serve` stdio
@@ -158,7 +182,7 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **89 passed, 0 skipped** (~79s) — **20/20 acceptance tests green**
+- pytest: **92 passed, 0 skipped** (~92s) — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
   (temp store, user `~/.mycelium` untouched — 1.9s / 4.4s / 2.3s); P2 mcp_adapter (8): green
@@ -166,6 +190,8 @@ agents do the reasoning.
   durable `usage_json` evidence; below-threshold negative) green
 - P3 step 2: `test_i_crash_recovery.py` (4 integration) green — incl. packet-level assertion that
   the RECOVERY_CONTEXT (checkpoint or uncertain marker + `from_attempt`) reached attempt 2's stdin
+- P3 step 5: `test_u_marker_scope.py` (2 unit: marker_owned truth table, real-process scan tag) +
+  `test_i_orphan_scope.py` (1 integration: foreign instance's worker survives) green
 - Unit (53): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
   `classify` overflow-threshold (3), packet renderer, result validator + evaluate_attempt decision
   table + recovery-context bounding, migrations, event pruning, procfs identity/liveness, API redaction +
@@ -186,6 +212,7 @@ agents do the reasoning.
 2. ~~P3 step 4: mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
    store, user store untouched) + promote~~ ✅ DONE (2026-10-17) — **ALL 20 acceptance green,
    suite 89 passed / 0 skipped.**
-3. P3 step 5 (hardening): scope `startup_reconcile` orphan-kill to the instance's own db/lock
-   (see Known footgun — the global `/proc/*/environ` marker scan).
+3. ~~P3 step 5 (hardening): scope `startup_reconcile` orphan-kill to the instance's own
+   db/lock~~ ✅ DONE (2026-10-17) — `DISPATCHER_STATE_DIR` worker tag; foreign markers
+   recorded + never killed; suite 92 passed / 0 skipped.
 4. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.

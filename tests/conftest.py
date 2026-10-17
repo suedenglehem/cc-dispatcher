@@ -278,12 +278,15 @@ class Env:
         return handle
 
     def _write_toml(self, backends, groups, profiles, projects,
-                    mycelium: dict | None = None) -> Path:
+                    mycelium: dict | None = None, root: Path | None = None) -> Path:
+        """Write a config; root= overrides the state dir (multi-instance
+        tests run two instances with separate db/flock/socket)."""
+        r = Path(root) if root is not None else self.root
         L: list[str] = []
         L += ["[state]",
-              f"root = {json.dumps(str(self.root))}",
-              f"worktree_root = {json.dumps(str(self.root / 'worktrees'))}",
-              f"socket = {json.dumps(str(self.root / 'run' / 'dispatcher.sock'))}",
+              f"root = {json.dumps(str(r))}",
+              f"worktree_root = {json.dumps(str(r / 'worktrees'))}",
+              f"socket = {json.dumps(str(r / 'run' / 'dispatcher.sock'))}",
               "",
               "[daemon]",
               "tick_s = 0.2",
@@ -335,7 +338,7 @@ class Env:
             for k, v in pr.items():
                 L.append(f"{k} = {json.dumps(v)}")
             L.append("")
-        path = self.root / "config.toml"
+        path = r / "config.toml"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("\n".join(L), encoding="utf-8")
         return path
