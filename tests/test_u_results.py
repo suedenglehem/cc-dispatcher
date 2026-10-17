@@ -96,6 +96,34 @@ def test_validate_result_empty_summary_rejected():
     assert any("summary" in e for e in errs)
 
 
+def test_memory_references_numeric_ids_accepted():
+    # Regression: a worker cited real Mycelium ids [190, 201] as ints and was
+    # rejected as "must be a list of strings" — a numeric id is a valid ref.
+    errs = validate_result(_valid_result(memory_references=[190, 201]),
+                           job_id="j1", attempt_id="j1-a1")
+    assert errs == []
+
+
+def test_memory_references_string_and_mixed_accepted():
+    for mr in (["190", "201"], [190, "201"], []):
+        errs = validate_result(_valid_result(memory_references=mr),
+                               job_id="j1", attempt_id="j1-a1")
+        assert errs == [], mr
+
+
+def test_memory_references_garbage_rejected():
+    for mr in ([True], [1.5], [{}, 1], ["   "], "not-a-list", [None]):
+        errs = validate_result(_valid_result(memory_references=mr),
+                               job_id="j1", attempt_id="j1-a1")
+        assert any("memory_references" in e for e in errs), mr
+
+
+def test_memory_references_absent_is_fine():
+    obj = _valid_result()
+    del obj["memory_references"]
+    assert validate_result(obj, job_id="j1", attempt_id="j1-a1") == []
+
+
 # -- parse_checkpoint --------------------------------------------------------
 
 def test_parse_checkpoint_valid_and_defaulted(tmp_path):

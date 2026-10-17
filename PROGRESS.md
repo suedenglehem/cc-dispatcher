@@ -16,14 +16,16 @@
 | P1 | Real-model smoke (real claude worker on a freed backend) | ✅ done |
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
-| P4 | Cline adapter, resource-group demo, hardening, full docs + install | 🔶 in progress (adapter + docs done; live smokes gated) |
+| P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, Cline root-caused (user-side fix), group cap proven live |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
   adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
   `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **96 passed, 0 skipped** (~95s)
+- Suite: **102 passed, 0 skipped** (~100s) — 6 added with the P4-live bug fixes
+  (FK tombstone `test_i_backend_rename.py` ×2, `memory_references` numeric-id contract
+  `test_u_results.py` ×4)
 
 ## P3 (recovery / restart / memory / failure injection) — COMPLETE
 Goal: all 20 acceptance tests green, using real subprocesses.
@@ -100,9 +102,9 @@ Remaining:
    still succeeds). `Env._write_toml(root=...)` for the second state dir. Suite 92 passed /
    0 skipped (~92s).
 
-## Current milestone: P4 (Cline, resource groups, full docs)
-Status: **in progress (2026-10-17)** — adapter + docs done; live smokes gated on the user
-freeing a backend.
+## Current milestone: P4 (Cline, resource groups, full docs) — COMPLETE
+Status: **done (2026-10-17)** — all three gated live smokes were run once the user freed
+both worker backends (strata :8080 and ak); backends re-reserved/disabled after each.
 
 1. ~~Cline adapter~~ ✅ (2026-10-17) — flags verified against `cline --help` 3.0.56
    (positional prompt = act mode; two draft bugs fixed: `-p` is PLAN mode → removed,
@@ -120,19 +122,48 @@ freeing a backend.
    26 event names, status_detail values, console scripts, live config shape).
 3. Suite: **96 passed, 0 skipped** (~95s); 20/20 acceptance still green.
 
-Remaining — ALL gated on the user freeing a backend (re-reserve/disable after each):
-- Live Cline smoke: pass or documented exact failure in `docs/cline-status.md`
-  (NEVER faked); also needs Cline's stored `openai-compatible` model entry to match the
-  served id. Protocol is in that doc; record the outcome verbatim; flip `smoke_verified`
-  only on a real pass.
-- i7: `ladd backend enable i7` + 1-token `ladd backend check i7` (label case
-  `local-metrics` ↔ `qwen3.8-27b`), re-disable after.
-- Resource-group demo on real backends (group cap itself is already covered by
-  acceptance a04 with fakes).
+Live smokes — all run 2026-10-17 on freed backends, recorded verbatim, then re-secured:
+- **ak Claude Code smoke — PASS** (`j_1bd3187818`, first attempt, real model, ~2.5 min):
+  worker added `triple(a)` + test, 3 tests passed, commit `97240a9`. Proved the exact
+  claude flag combo (stream-json + stdin + `--allowedTools` MCP names + result-file
+  contract) against a real llama.cpp backend.
+- **Cline smoke — FAILED, root-caused, not faked** (`j_bc96773bee`, attempt 1, exit 1,
+  class `crash`, `recovery_exhausted`): Cline's `openai-compatible` provider reads its
+  base URL **only from the stored provider config**, ignoring `OPENAI_API_BASE`/
+  `OPENAI_BASE_URL` — strace shows 38×TCP :443 + SNI `api.openai.com`, 0× :8080. This is a
+  Cline-side settings defect, not a dispatcher defect. Full verbatim evidence + the user
+  fix (Base URL `http://127.0.0.1:8080/v1`, Model `swift-1.5-iq3_xxs`) are in
+  `docs/cline-status.md`. `ClineAdapter.smoke_verified` stays `False` until the user
+  applies that setting and the smoke is re-run and passes.
+- **Resource-group cap demo — serialization proven live, BOTH jobs SUCCEEDED**
+  (group `tr4`, max_concurrency=1; clean re-run 2026-10-17 20:31–20:37 CEST, post-fix
+  daemon): job A2 (is_even, `j_3092d3777e`) on tr4-secondary 18:31:21→18:33:26Z held both
+  the `tr4-secondary` backend AND the `tr4` group reservation; job B (cube, `j_a3b9717dda`)
+  pinned to ak sat `queued|no_capacity` for ~105s while ak was physically idle — `ladd
+  workers` showed ak `state=busy health=online` with zero reservations (busy purely from
+  group budget consumption, exactly the PRD §7.5 semantics); B launched 11ms after A2's slot
+  freed and succeeded on ak (3m31s). Commits `a1427ff` / `f6576d1`; both workers cited
+  numeric Mycelium ids (`[190, 201, 204, 205]` / `[190, 204, 205]`) accepted by the live
+  validator — the `memory_references` fix proven end-to-end with real models. (a04 covers
+  this with fakes; this is the real-backend confirmation.)
 
-Next unfinished task: the three gated live smokes above — nothing in P4 is buildable
-without a freed backend; when the user frees one, start with the Cline smoke protocol in
-`docs/cline-status.md`.
+Two bugs found + fixed during the live smokes (both regression-tested, suite 96→102):
+1. **FK tombstone** (`backends.py`): a config backend rename is remove+add; `sync()` now
+   keeps a removed backend that jobs/attempts still reference as an inert tombstone
+   (`enabled=0, manually_reserved=1, reserved_note='removed from config; …'`) instead of
+   raising IntegrityError, and deletes only unreferenced removed backends.
+   `tests/test_i_backend_rename.py` (2).
+2. **`memory_references` contract** (`results.py` + `packets.py`): recall output carries
+   numeric Mycelium ids, so workers cite them as ints (`[190, 201]`) and were rejected by
+   a "list of strings" check. Now `_is_mem_ref` accepts a number OR string (rejects bool/
+   float/dict/blank), and the packet RESULT_CONTRACT documents the field.
+   `tests/test_u_results.py` (+4).
+
+Next unfinished task: **re-run the Cline smoke after the user sets the provider Base URL**
+(`http://127.0.0.1:8080/v1`) in `~/.cline` — record the outcome verbatim; flip
+`ClineAdapter.smoke_verified = True` only on a real pass. (Housekeeping: ~13 stale
+worktrees under `~/.local/share/local-dispatcher/worktrees/` from earlier demo jobs; pruning
+deferred.)
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
@@ -150,5 +181,9 @@ without a freed backend; when the user frees one, start with the Cline smoke pro
 ## Live environment (as of 2026-10-17)
 - tr4-primary `:8091` (vLLM, qwen3.8-27b-fp8) = the primary coordinating session, never worker-scheduled.
 - tr4-secondary `:8080` (strata, `swift-1.5-iq3_xxs`) = RESERVED for the Cline interactive session.
-- i7 `192.168.0.100:8080` (llama.cpp, `local-metrics`) = disabled (second interactive Claude session).
+- ak `192.168.0.33:8080` (llama.cpp, `qwen3.8-27b` Q6_K, n_ctx 122880) = the second worker
+  backend, **disabled** by default. Host was renamed i7 → ak and moved 192.168.0.100 → .33
+  on 2026-10-17; `/etc/hosts` still points the name at the OLD .100, so **use the IP, not the
+  name**. Enable only when free: `ladd backend enable ak` (then `ladd backend check ak`).
 - Both worker backends are enabled only when the user frees them; re-reserve/disable after any demo.
+  Config is the source of truth and re-asserts these safe states on every daemon start.

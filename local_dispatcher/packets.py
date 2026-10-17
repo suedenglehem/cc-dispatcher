@@ -117,5 +117,8 @@ def render_packet(*, project_row: dict, job: dict, attempt_no: int,
         "incomplete, blocked, or failed — atomically write (tmp file + "
         "rename) this JSON to RESULT_PATH. Record actual test commands and "
         "results only. Every acceptance criterion must be listed with a "
-        "status and evidence reference:\n" + RESULT_SCHEMA)
+        "status and evidence reference. memory_references lists the Mycelium "
+        "memory ids (the numbers of any recalled memories you actually relied "
+        "on), as numbers (e.g. [190, 201]) — use [] if you relied on none:\n"
+        + RESULT_SCHEMA)
     return "\n".join(parts) + "\n"

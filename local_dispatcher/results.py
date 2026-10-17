@@ -31,6 +31,16 @@ def _is_sha(v) -> bool:
     return isinstance(v, str) and 7 <= len(v) <= 64 and all(c in _SHA for c in v)
 
 
+def _is_mem_ref(v) -> bool:
+    """A memory reference is a Mycelium memory id (int) or a short string ref.
+    Recall output carries numeric ids, so a bare int is a valid reference, not
+    a type error. Rejects bool (isinstance(True, int) is True in Python),
+    float, dict, and empty/whitespace-only strings."""
+    if isinstance(v, bool):
+        return False
+    return isinstance(v, (int, str)) and str(v).strip() != ""
+
+
 def context_pct(last_context_tokens, ctx_max, warn_pct: float = 0.65):
     """Return (pct, warning) from a per-turn usage measurement.
 
@@ -104,10 +114,16 @@ def validate_result(obj: dict, *, job_id: str, attempt_id: str) -> list[str]:
                             f"not in {CRITERION_STATUSES}")
             elif not isinstance(c.get("evidence"), str):
                 errs.append(f"acceptance_criteria[{i}].evidence: missing string")
-    for key in ("remaining_work", "blockers", "assumptions", "memory_references"):
+    for key in ("remaining_work", "blockers", "assumptions"):
         v = obj.get(key)
         if v is not None and (not isinstance(v, list) or not all(isinstance(x, str) for x in v)):
             errs.append(f"{key}: must be a list of strings")
+    # memory_references names the Mycelium memories the worker relied on — a
+    # numeric id (as the recall output carries them) or a short string ref.
+    mr = obj.get("memory_references")
+    if mr is not None and (not isinstance(mr, list) or not all(_is_mem_ref(x) for x in mr)):
+        errs.append("memory_references: must be a list of memory ids (numbers) "
+                    "or string references")
     cp = obj.get("checkpoint_path", None)
     if cp is not None and not isinstance(cp, str):
         errs.append("checkpoint_path: must be a string")

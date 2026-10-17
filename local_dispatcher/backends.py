@@ -84,11 +84,32 @@ class BackendRegistry:
                      _json(b.credential_env), b.enabled, b.is_primary, b.manually_reserved,
                      b.reserved_note, b.concurrency, b.resource_group or None, b.notes),
                 )
-            # Remove backends no longer in config.
+            # Remove backends no longer in config. A config rename is a
+            # remove + add, and historical rows (jobs/attempts) may still
+            # reference the old id — those keep it as an inert tombstone
+            # (disabled + reserved, never scheduled) so the foreign keys
+            # stay resolvable instead of the delete crashing the daemon.
             ids = [b.id for b in self.cfg.backends]
             if ids:
                 placeholders = ",".join("?" * len(ids))
-                conn.execute(f"DELETE FROM backends WHERE id NOT IN ({placeholders})", tuple(ids))
+                removed = conn.execute(
+                    f"SELECT id FROM backends WHERE id NOT IN ({placeholders})",
+                    tuple(ids)).fetchall()
+                for (rid,) in removed:
+                    referenced = (
+                        conn.execute(
+                            "SELECT 1 FROM jobs WHERE backend_id = ? LIMIT 1",
+                            (rid,)).fetchone()
+                        or conn.execute(
+                            "SELECT 1 FROM attempts WHERE backend_id = ? LIMIT 1",
+                            (rid,)).fetchone())
+                    if referenced:
+                        conn.execute(
+                            "UPDATE backends SET enabled = 0, manually_reserved = 1, "
+                            "reserved_note = 'removed from config; tombstone for history' "
+                            "WHERE id = ?", (rid,))
+                    else:
+                        conn.execute("DELETE FROM backends WHERE id = ?", (rid,))
             for p in self.cfg.profiles:
                 conn.execute(
                     """INSERT INTO worker_profiles(id, adapter, executable, args, env_overrides,

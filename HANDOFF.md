@@ -26,16 +26,43 @@ agents do the reasoning.
   — **20/20 acceptance tests green**; step 5 (hardening) = the `startup_reconcile` orphan-kill
   scoped to the instance's own state dir (`DISPATCHER_STATE_DIR` worker tag; foreign markers
   recorded, never killed) — **full suite 92 passed / 0 skipped**
-- P4 (Cline/docs/hardening): **in progress (2026-10-17)** — Cline adapter verified against
-  `cline --help` 3.0.56 (found + fixed two draft bugs: `-p` is PLAN mode, removed;
-  `--auto-approve false` would hang, now `true`; added `-t` remaining-budget and per-attempt
-  `--data-dir` isolation) + 4 tests driving it through the real daemon with a fake binary
-  (`test_i_cline_adapter.py`). Full docs set written: setup, recovery, troubleshooting,
-  mycelium-notes, cline-status; config example gained the cline profile. **Live Cline smoke
-  GATED** (both worker backends reserved/disabled for live interactive sessions + Cline's
-  stored model entry ≠ served model) — verdict + exact unblock protocol documented in
-  `docs/cline-status.md` per PRD §9 (never faked). i7 enable GATED on the user freeing it.
-  **full suite 96 passed / 0 skipped**
+- P4 (Cline/docs/hardening): **live smokes + fixes done (2026-10-17)** — Cline adapter
+  verified against `cline --help` 3.0.56 (found + fixed two draft bugs: `-p` is PLAN mode,
+  removed; `--auto-approve false` would hang, now `true`; added `-t` remaining-budget and
+  per-attempt `--data-dir` isolation) + 4 tests driving it through the real daemon with a
+  fake binary. Full docs set written. User freed both backends → the two gated live smokes
+  ran:
+  - **Claude Code smoke on `ak` (ex-i7): PASSED** — `j_1bd3187818` succeeded on the first
+    attempt (~2.5 min, real model), valid result.json + diff (added `triple(a)`), commit
+    97240a9, tests via `uv`. Host renamed i7→ak, IP 192.168.0.100→**192.168.0.33** (config +
+    `/etc/hosts` note updated; served id == label so no case gate).
+  - **Cline smoke on tr4-secondary (strata): FAILED, root-caused, never faked** — attempt 1
+    exit 1, class `crash`, job `blocked(recovery_exhausted)`. The 401 came from
+    **`api.openai.com`, not strata**: strace of a manual Cline run (38× :443, 3× :53, 0× :8080,
+    SNI `api.openai.com`) proved Cline 3.0.56's `openai-compatible` provider reads the key from
+    `OPENAI_API_KEY` but the **base URL only from its stored provider config** — it ignores
+    `OPENAI_API_BASE`/`OPENAI_BASE_URL`. Fix is USER-side (Cline settings → Providers →
+    openai-compatible → Base URL = `http://127.0.0.1:8080/v1`); dispatcher path proven
+    end-to-end except that last hop. `ClineAdapter.smoke_verified` stays `False`. Verbatim
+    evidence + re-run protocol in `docs/cline-status.md`.
+  - **Resource-group cap demo on real backends — DONE, both jobs SUCCEEDED (clean re-run,
+    2026-10-17 20:31–20:37 CEST, post-fix daemon pid 33270)**: group `tr4` (max 1) spans
+    tr4-secondary + ak. Job A2 `j_3092d3777e` (is_even) ran on tr4-secondary 18:31:21→18:33:26Z
+    holding BOTH the `tr4-secondary` backend AND the `tr4` group reservation; job B `j_a3b9717dda`
+    (cube) pinned to ak sat `queued|no_capacity` for ~105s **while ak was physically idle**
+    (`ladd workers`: ak `state=busy health=online`, zero reservations — busy purely from group
+    consumption, PRD §7.5); B launched at 18:33:26.218Z — 11ms after A2's slot freed — and
+    succeeded on ak (3m31s). Both results valid, commits `a1427ff` / `f6576d1`, and both workers
+    cited numeric Mycelium ids (`[190, 201, 204, 205]` / `[190, 204, 205]`) accepted by the live
+    validator — the `memory_references` fix proven end-to-end with real models.
+  - **Two real bugs found + fixed + regression-tested** by the live runs: (1) FK crash on a
+    config backend rename (i7→ak) — `backends.sync()` now keeps a removed-but-referenced
+    backend as an inert tombstone instead of `DELETE`-ing an FK-referenced row
+    (`test_i_backend_rename.py`, 2); (2) `memory_references` contract gap — a worker that
+    cited real Mycelium ids `[190, 201]` (ints) was rejected as "must be a list of strings";
+    the field is now documented in the packet and the validator accepts a memory id as number
+    or string (`test_u_results.py`, +4).
+  **full suite 102 passed / 0 skipped**
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
 - Symptom: 4 daemon-spawned workers on the OLD daemon (pid 16445) died exit 143 (SIGTERM, class=crash),
@@ -81,12 +108,46 @@ agents do the reasoning.
 - tr4-secondary `:8080` = strata custom Python serving stack (`/dd2/strata/serve/server.py`, serves
   `swift-1.5-iq3_xxs`, claude label `qwen`, ctx_max 83491) = Cline interactive → `manually_reserved`
   (RESTORED to reserved after the 10-17 demo)
-- i7 `192.168.0.100:8080` (llama.cpp `local-metrics`, label `qwen3.8-27b`, ctx_max 128563) = 2nd Claude →
-  `enabled=false` in config (RESTORED to disabled after the 10-17 demo)
+- **ak** (host renamed from i7 on 2026-10-17) `192.168.0.33:8080` (llama.cpp, served id
+  `qwen3.8-27b` Q6_K, n_ctx 122880, ctx_max 110592) = 2nd worker backend → `enabled=false`
+  in config (RESTORED to disabled after the 10-17 demo). **Use the IP, not the name** — the
+  `/etc/hosts` entry still points at the stale `192.168.0.100`.
 - claude **2.1.302** (needs `--verbose` for stream-json; vLLM rejects default effort `high` → `--effort xhigh`)
 - **Never read/echo `~/.cline/data`** (provider secret). Never touch the two interactive sessions.
 - **Post-restart ops:** config reasserts on daemon start — after ANY restart, re-release tr4-secondary and
-  re-enable i7 if workers should run on them. `pgrep -af local-dispatcher` finds the daemon (not `dispatcherd`).
+  re-enable ak if workers should run on them. `pgrep -af local-dispatcher` finds the daemon (not `dispatcherd`).
+- **No hot-reload (learned the hard way 2026-10-17):** editing `local_dispatcher/*.py` on disk does
+  NOT affect the running daemon. After any code change that must be live (e.g. the `memory_references`
+  fix — a real-model job cited numeric ids and the OLD daemon still rejected them), restart:
+  `systemctl --user restart local-dispatcher`. Check freshness with
+  `systemctl --user show local-dispatcher -p MainPID,ActiveEnterTimestampMonotonic` vs file mtimes.
+
+## Changed files (2026-10-17 — live smokes + two bug fixes)
+- `local_dispatcher/backends.py` — `sync()` removal path: a backend dropped from config is
+  kept as an **inert tombstone** (`enabled=0`, `manually_reserved=1`,
+  `reserved_note='removed from config; tombstone for history'`) when any job/attempt row
+  still references it, instead of `DELETE`-ing an FK-referenced row (which raised
+  `sqlite3.IntegrityError` at daemon start after the i7→ak rename); an unreferenced removed
+  backend is still deleted.
+- `tests/test_i_backend_rename.py` (NEW, 2) — referenced-removed→tombstone, unreferenced-
+  removed→deleted. `_resync` opens its OWN `Database` (sqlite connections are thread-bound;
+  the test thread ≠ the daemon thread).
+- `local_dispatcher/results.py` — `_is_mem_ref()` helper (int-or-str memory id, rejects
+  bool/float/dict/empty); `memory_references` split out of the free-text fields' "list of
+  strings" check so a worker citing numeric Mycelium ids `[190, 201]` validates. The three
+  genuinely free-text fields (`remaining_work`/`blockers`/`assumptions`) stay strict.
+- `local_dispatcher/packets.py` — `RESULT_CONTRACT` now tells the worker that
+  `memory_references` lists the Mycelium memory ids (numbers) of recalled memories it relied
+  on, else `[]`.
+- `tests/test_u_results.py` (+4) — numeric/string/mixed ids accepted; bool/float/dict/empty/
+  non-list rejected; absent field fine.
+- `docs/cline-status.md` — the 2026-10-17 real-smoke failure recorded VERBATIM (job
+  j_bc96773bee, exit 1, stream tail, strace root cause, the user-side Base URL fix, updated
+  re-run protocol, `OPENAI_API_BASE`-ineffective caveat); verdict header updated.
+- `~/.config/local-dispatcher/config.toml` (LIVE, not in repo) — `ak` backend block (IP
+  .33, group `tr4`, `enabled=false` default) + header i7→ak note; `cc-worker` profile
+  `backend_ids = ["tr4-secondary", "ak"]`; `[[resource_groups]] tr4 max_concurrency=1` spans
+  both worker backends.
 
 ## Changed files (P4 — Cline adapter + full docs)
 - `local_dispatcher/adapters/cline.py` — rewritten on the `cline --help` 3.0.56 evidence:
@@ -218,7 +279,7 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **96 passed, 0 skipped** (~95s) — **20/20 acceptance tests green**
+- pytest: **102 passed, 0 skipped** (~95s) — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
   (temp store, user `~/.mycelium` untouched — 1.9s / 4.4s / 2.3s); P2 mcp_adapter (8): green
@@ -254,11 +315,13 @@ agents do the reasoning.
 3. ~~P3 step 5 (hardening): scope `startup_reconcile` orphan-kill to the instance's own
    db/lock~~ ✅ DONE (2026-10-17) — `DISPATCHER_STATE_DIR` worker tag; foreign markers
    recorded + never killed; suite 92 passed / 0 skipped.
-4. P4 (in progress, 2026-10-17): Cline adapter done (verified flags, 4 tests, `smoke_verified=False`
-   until a live pass) + full docs set + config example. Remaining, ALL GATED on the user freeing
-   a backend: (a) live Cline smoke per the protocol in `docs/cline-status.md` (also needs Cline's
-   stored `openai-compatible` model entry to match the served id) → record the verbatim outcome,
-   flip `smoke_verified` only on a real pass; (b) i7: `ladd backend enable i7` + 1-token
-   `ladd backend check i7` (label case), then re-disable; (c) resource-group demo on real
-   backends (group cap itself already covered by acceptance a04 with fakes). After each demo:
-   re-reserve/disable the backend.
+4. P4 live smokes (2026-10-17): **(a) Claude Code on ak — DONE, PASSED**
+   (j_1bd3187818, commit 97240a9); **(c) resource-group cap demo on real backends — DONE,
+   BOTH SUCCEEDED** (A2 j_3092d3777e on tr4-secondary 105s → B j_a3b9717dda queued
+   `no_capacity` on idle ak → launched 11ms after the group slot freed → succeeded on ak;
+   commits a1427ff / f6576d1); **(b) Cline on strata — attempted, FAILED at Cline's
+   base-URL layer, root-caused via strace, recorded verbatim in `docs/cline-status.md`**.
+   The Cline re-run is BLOCKED on the USER setting Cline → Providers → `openai-compatible`
+   → **Base URL = `http://127.0.0.1:8080/v1`** (Model `swift-1.5-iq3_xxs`); on a real pass
+   flip `ClineAdapter.smoke_verified=True`, re-reserve tr4-secondary after. Backends
+   re-secured to safe defaults after each demo (tr4-secondary reserved, ak disabled).
