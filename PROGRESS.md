@@ -185,11 +185,29 @@ at `aea44a6` (cube) — all three marked `integration_disposition: accepted`
 via `ladd integrate`; tests kept in `tests/test_app.py`; demo-repo suite
 5/5 passed on main. `j_bba5405826` (Cline) was a duplicate of the triple task
 and its branch held no commit (worktree changes only) — nothing to merge, not
-marked integrated. Pushed to origin (github.com:suedenglehem/cc-dispatcher,
-`389ad9a..ad30551`, 2026-10-17): the dispatcher repo tree is clean and in
-sync with GitHub. Next unfinished task: none — the project is in a clean
-closed state (suite 104/104, 20/20 acceptance, both live smokes passed and
-recorded, backends re-secured, repo pushed).
+marked integrated. **Post-P4 (2026-10-17, both done, pushed as `283b632`):**
+(a) `ladd status` 8k-cap failure FIXED — default view bounded forever
+(terminal jobs collapse to `jobs_terminal {count, recent: last 5}`), explicit
+`--all-jobs` full dump is cap-exempt (the MCP forwarder never sends
+`all_jobs`); +4 regression tests. Verified live: bounded default 4095 chars
+with 20 jobs in history, full dump 13494 chars. (b) Dual-boot topology
+CORRECTED per user — ak = 192.168.0.100 WINDOWS boot, i7 = 192.168.0.33
+LINUX boot, one physical box, both `enabled=true` in group tr4; the earlier
+"host renamed i7→ak, moved .100→.33" note was WRONG. No scheduler code
+change needed: startup probes + 30s TTL already follow the live boot;
+recheck via `ladd workers --refresh` / `ladd backend check <id>`; a mid-job
+backend stop classifies `backend_disconnect` (retryable). Verified after
+restart: i7 available/online (Linux up), ak offline (Windows down). Mycelium
+#215 pins the corrected topology. Pushed to origin
+(github.com:suedenglehem/cc-dispatcher, `aa019c0..283b632`): tree clean, in
+sync with GitHub. `run.txt` (2026-10-17, user-requested): short start→finish
+command walkthrough — start/refresh → team submit → watch → integrate →
+finish → using the dispatcher in a different project (`ladd project add`
+runtime registration, e.g. vast; MCP tools auto-bind by cwd), plus
+troubleshooting one-liners; every command checked against the live CLI flag
+order. Uncommitted (untracked). Next unfinished task: none —
+the project is in a clean closed state (suite 108/108, 20/20 acceptance,
+both live smokes passed and recorded, backends re-secured, repo pushed).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
@@ -207,9 +225,15 @@ recorded, backends re-secured, repo pushed).
 ## Live environment (as of 2026-10-17)
 - tr4-primary `:8091` (vLLM, qwen3.8-27b-fp8) = the primary coordinating session, never worker-scheduled.
 - tr4-secondary `:8080` (strata, `swift-1.5-iq3_xxs`) = RESERVED for the Cline interactive session.
-- ak `192.168.0.33:8080` (llama.cpp, `qwen3.8-27b` Q6_K, n_ctx 122880) = the second worker
-  backend, **disabled** by default. Host was renamed i7 → ak and moved 192.168.0.100 → .33
-  on 2026-10-17; `/etc/hosts` still points the name at the OLD .100, so **use the IP, not the
-  name**. Enable only when free: `ladd backend enable ak` (then `ladd backend check ak`).
-- Both worker backends are enabled only when the user frees them; re-reserve/disable after any demo.
-  Config is the source of truth and re-asserts these safe states on every daemon start.
+- **Dual-boot box** (topology user-corrected 2026-10-17; the "renamed i7→ak,
+  moved .100→.33" note was WRONG): ONE physical machine, two boots — `ak` =
+  192.168.0.100:8080 = WINDOWS boot, `i7` = 192.168.0.33:8080 = LINUX boot;
+  both llama.cpp serving `qwen3.8-27b` (Q6_K, n_ctx 122880); only one boot
+  (one IP) is up at a time. Both ship `enabled=true` (group tr4, max 1);
+  startup probes + 30s TTL follow whichever boot is live — verified after the
+  2026-10-17 restart: i7 available/online (Linux up), ak offline (Windows
+  down). Recheck anytime: `ladd workers --refresh` / `ladd backend check <id>`.
+- tr4-secondary stays RESERVED for the Cline interactive session; release it
+  (`ladd backend release tr4-secondary`) only while that session is off it,
+  and re-reserve after any demo. Config is the source of truth and re-asserts
+  these states on every daemon start.

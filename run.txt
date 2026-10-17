@@ -1,0 +1,92 @@
+RUN NOTE — local agent dispatcher (ladd)
+=========================================
+Topology: dual-boot box — ak = 192.168.0.100 (WINDOWS boot),
+i7 = 192.168.0.33 (LINUX boot). Only ONE is up at a time; the 30s
+probes follow the live boot automatically, nothing to switch.
+tr4-secondary :8080 is reserved for the interactive Cline session.
+
+1. START
+   systemctl --user start local-dispatcher         # or: restart
+   systemctl --user status local-dispatcher        # expect Active: running
+   ladd workers --refresh                          # force probes now:
+                                                   #   one of ak/i7 = available,
+                                                   #   the other = offline
+   ladd status                                     # projects/modes, jobs, workers
+
+2. DELEGATE (team mode)
+   ladd mode demo team
+   BASE=$(git -C /dd2/andrei/claude/dispatcher/demo-repo rev-parse HEAD)
+   ladd submit "add a double(a) function + test" $BASE cc-worker \
+       --scope src --scope tests \
+       --criterion "pytest passes; double() added to src/app.py" \
+       --project demo
+   # optional: --backend i7   (pin one boot; otherwise the scheduler
+   # picks whichever online backend the profile allows)
+   # in the primary session the same ops exist as MCP tools: dispatch_*
+
+3. WATCH
+   ladd status                                     # bounded view (safe, always <8k)
+   ladd job j_XXXX                                 # status, attempts, artifacts
+   ladd job j_XXXX --full                          # + result JSON
+   ladd --json status --all-jobs                   # full history dump (cap-exempt)
+   # artifacts: ~/.local/share/local-dispatcher/artifacts/<job>/attempt-<n>/
+   #   stream.log, checkpoint.json, result.json, diff.patch
+
+4. INTEGRATE (the primary is the integration authority)
+   # review first: the worktree/branch is dispatch/j_XXXX
+   git -C /dd2/andrei/claude/dispatcher/demo-repo fetch
+   git -C /dd2/andrei/claude/dispatcher/demo-repo merge dispatch/j_XXXX
+   NEWSHA=$(git -C /dd2/andrei/claude/dispatcher/demo-repo rev-parse HEAD)
+   ladd integrate j_XXXX --commit $NEWSHA
+   ladd promote j_XXXX                             # optional: pin [decision] memory
+
+5. FINISH
+   ladd mode demo single --policy drain            # let running jobs finish
+                                                   # (--policy cancel to kill them)
+   ladd status                                     # confirm drained / terminal
+   ladd backend reserve tr4-secondary --note "Cline interactive session"
+   systemctl --user stop local-dispatcher          # optional: SIGTERM stops the
+                                                   # scheduler, WORKERS KEEP RUNNING
+                                                   # and are re-adopted on next start
+
+6. USE IT IN A DIFFERENT PROJECT (e.g. /dd2/andrei/docker/vast)
+   One-time, per repo — the folder must be a git repository:
+      ladd project add vast /dd2/andrei/docker/vast \
+          --integration-ref main \
+          --mycelium-project vast
+      # --integration-ref = the branch you merge dispatch/* into;
+      #   default is "main" — pass it explicitly if the repo uses e.g. master
+      # runtime add: no daemon restart needed, survives restarts (stored in
+      #   the dispatcher DB; config [[projects]] is only synced in, never out)
+      ladd project list                            # confirm; new projects
+                                                   # start in 'single' mode
+      # worktrees for its jobs live under ~/.local/share/local-dispatcher/
+      # worktrees/ — NOT inside the project folder
+
+   Then the same loop as steps 2-5, aimed at the new project:
+      ladd mode vast team
+      BASE=$(git -C /dd2/andrei/docker/vast rev-parse HEAD)
+      ladd submit "<independent task>" $BASE cc-worker \
+          --scope <dir1> --scope <dir2> \
+          --criterion "<what 'done' means>" \
+          --project vast
+      # --scope paths are relative to the repo root
+      ladd job j_XXXX --full                       # watch
+      git -C /dd2/andrei/docker/vast fetch
+      git -C /dd2/andrei/docker/vast merge dispatch/j_XXXX
+      NEWSHA=$(git -C /dd2/andrei/docker/vast rev-parse HEAD)
+      ladd integrate j_XXXX --commit $NEWSHA
+      ladd mode vast single --policy drain
+
+   From a Claude Code session sitting IN /dd2/andrei/docker/vast, the
+   dispatch_* MCP tools bind to it automatically (the session's cwd is
+   longest-prefix-matched against registered projects) — no project_id
+   needed. From the terminal, name it explicitly: `ladd mode <id> ...`
+   (positional) and `ladd submit ... --project <id>`.
+
+TROUBLESHOOTING (one-liners)
+   ladd backend check i7                           # force one probe + show its row
+   ladd job j_XXXX --full && ladd --json events --subject-type job --subject-id j_XXXX
+   ladd resume j_XXXX                              # after a blocked decision
+   ladd reconcile                                  # free quarantined capacity
+   docs/commands.md — copyable prompts + full command reference
