@@ -16,7 +16,7 @@
 | P1 | Real-model smoke (real claude worker on a freed backend) | ✅ done |
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
-| P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, Cline root-caused (user-side fix), group cap proven live |
+| P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, **Cline PASS** (root-caused → `ccline` fix → real pass `j_bba5405826`), group cap proven live |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
@@ -111,9 +111,10 @@ both worker backends (strata :8080 and ak); backends re-reserved/disabled after 
    `--auto-approve false` would hang unattended → `true`); added `-t` = remaining job
    budget and per-attempt `--data-dir <artifact_dir>/cline-data` (worker never touches
    `~/.cline/data`; dispatcher never reads it — provider key stays in Cline's process);
-   `tests/test_i_cline_adapter.py` (4: e2e through the real daemon with a fake binary
-   speaking the argv-prompt contract, build() contract, timeout math, classify).
-   `ClineAdapter.smoke_verified` stays `False` — PRD §9: no real smoke, no "complete".
+   `tests/test_i_cline_adapter.py` (6: e2e through the real daemon with a fake binary
+   speaking the argv-prompt contract, build() contract, timeout math, classify,
+   ccline wrapper ×2). `ClineAdapter.smoke_verified = True` — real model-level
+   pass recorded 2026-10-17 (`j_bba5405826`, `docs/cline-status.md`).
 2. ~~Full docs~~ ✅ — `docs/setup.md`, `docs/recovery.md`, `docs/troubleshooting.md`,
    `docs/mycelium-notes.md`, `docs/cline-status.md` (the PRD §9 verdict + exact unblock
    protocol); `docs/commands.md` already shipped verbatim §21; `config.example.toml`
@@ -138,8 +139,15 @@ Live smokes — all run 2026-10-17 on freed backends, recorded verbatim, then re
   data-dir, then `exec cline <argv>`; `cline-worker` profile executable now `ccline`.
   Proven against real cline 3.0.56 (refused-port oracle: run dials the seeded URL,
   setting survives the run's save). No user Cline-UI change is needed. Full evidence +
-  protocol in `docs/cline-status.md`. `ClineAdapter.smoke_verified` stays `False`
-  until the re-run passes.
+  protocol in `docs/cline-status.md`.
+  **Re-run 2026-10-17 — PASS** (`j_bba5405826`, attempt 1, exit 0, ~1m45s, after the
+  user freed tr4-secondary): `ccline-auth.log` "Provider configured: openai-compatible
+  (swift-1.5-iq3_xxs)"; run dialed the seeded `http://127.0.0.1:8080/v1` (run_result
+  `finishReason: completed`, 15 iterations, 142845 input tokens); valid `result.json`
+  (outcome completed, `triple(a)` + `test_triple`, pytest 3 passed); job `succeeded`
+  with `scope_review_required` — the worker's out-of-scope `.venv/` (1982 paths, zero
+  outside it) was correctly flagged (a18 semantics). tr4-secondary re-reserved
+  after. `ClineAdapter.smoke_verified = True`.
 - **Resource-group cap demo — serialization proven live, BOTH jobs SUCCEEDED**
   (group `tr4`, max_concurrency=1; clean re-run 2026-10-17 20:31–20:37 CEST, post-fix
   daemon): job A2 (is_even, `j_3092d3777e`) on tr4-secondary 18:31:21→18:33:26Z held both
@@ -164,14 +172,13 @@ Two bugs found + fixed during the live smokes (both regression-tested, suite 96�
    float/dict/blank), and the packet RESULT_CONTRACT documents the field.
    `tests/test_u_results.py` (+4).
 
-Next unfinished task: **re-run the Cline smoke — the only gate is the user freeing
-tr4-secondary** (base-URL blocker removed by the `ccline` launcher): `ladd backend
-release tr4-secondary` (AFTER any daemon restart, which re-asserts the reservation),
-submit a tiny `cline-worker` job, record the outcome VERBATIM (exit code, stdout
-tail, result.json); flip `ClineAdapter.smoke_verified = True` only on a real pass;
-re-reserve tr4-secondary after. (Housekeeping: ~13 stale worktrees under
-`~/.local/share/local-dispatcher/worktrees/` from earlier demo jobs +
-`/tmp/cline-seed-test*` scratch dirs; pruning deferred.)
+All gated P4 work is DONE — both live smokes passed (ak Claude Code `j_1bd3187818`;
+Cline `j_bba5405826`), backends re-secured (tr4-secondary reserved, ak disabled).
+Next unfinished task: housekeeping only — prune the stale worktrees under
+`~/.local/share/local-dispatcher/worktrees/` (now ~14, incl. `j_bba5405826`) from
+demo jobs and the `/tmp/cline-seed-test*` + `/tmp/cline-cc-test` scratch dirs;
+optional: decide whether demo smoke results (`triple` etc.) should be integrated
+into demo-repo main (left unmerged by design).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

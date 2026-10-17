@@ -1,12 +1,12 @@
 # Cline adapter — status and compatibility diagnostics
 
-*Updated 2026-10-17 (P4). Verdict: **interface identified, adapter built and
-faked-tested; the one real-smoke failure (Cline's provider base-URL layer)
-was root-caused and fixed dispatcher-side by the `ccline` launcher**
-(`bin/ccline`, installed to `/usr/local/bin/ccline`). The base-URL mechanism
-is proven against the real cline 3.0.56 binary. Per PRD §9 the adapter does
-not claim Cline automation is complete — that claim requires a real
-model-level pass on a freed backend, not yet recorded.*
+*Updated 2026-10-17 (P4). Verdict: **COMPLETE — real model-level smoke
+PASSED (job `j_bba5405826`, 2026-10-17, strata `swift-1.5-iq3_xxs`);
+`ClineAdapter.smoke_verified = True`.** The earlier smoke failure (Cline's
+provider base-URL layer) was root-caused via strace and fixed
+dispatcher-side by the `ccline` launcher (`bin/ccline` →
+`/usr/local/bin/ccline`), which the passing smoke exercised end-to-end.
+All outcomes recorded verbatim per PRD §9.*
 
 ## Verified on this machine (evidence)
 
@@ -84,11 +84,47 @@ The oracle run (through `/usr/local/bin/ccline`, real cline 3.0.56,
 `OPENAI_API_BASE=http://127.0.0.1:9/v1` — nothing listens on :9): exit 1,
 3 connects to :9, 0× :8080; post-run `providers.json` still held
 `baseUrl: http://127.0.0.1:9/v1` + `apiKey: local`. With strata's real
-base URL (`http://127.0.0.1:8080/v1`) the same path is expected to reach
-the model; that is the pending real smoke. `ClineAdapter.smoke_verified`
-stays `False` until it passes.
+base URL (`http://127.0.0.1:8080/v1`) the same path reached the model —
+see the passing smoke below.
 
-## Adapter design (what a live smoke would exercise)
+## Real smoke — PASS (2026-10-17, job `j_bba5405826`)
+
+Gate opened by the user (tr4-secondary / strata freed); released via
+`ladd backend release tr4-secondary`, one-token probe confirmed
+`swift-1.5-iq3_xxs` online, then a tiny job submitted on the
+`cline-worker` profile — same task shape as the ak Claude Code smoke
+(`triple(a)` + `test_triple`). tr4-secondary was re-reserved
+immediately after.
+
+- Attempt `j_bba5405826-a1`: **exit code 0**, started 19:37:17Z → ended
+  19:39:02Z (~1m45s). `ccline-auth.log`, verbatim: `Provider configured:
+  openai-compatible (swift-1.5-iq3_xxs)`. The run's `providers.json`
+  held `baseUrl: http://127.0.0.1:8080/v1` — the model call dialed
+  strata, not api.openai.com.
+- `stream.log` final line (fields, verbatim): `{"type":"run_result",
+  "finishReason":"completed","iterations":15,"usage":{"inputTokens":142845,
+  "outputTokens":4274,"cacheReadTokens":133136,"cacheWriteTokens":0,
+  "totalCost":0},"durationMs":101039,"text":"Task complete. ... added
+  the function following the exist..."}` — 15 real tool-use iterations
+  against the model.
+- `result.json` (valid, PRD §20): outcome `completed`; changed
+  `src/app.py` + `tests/test_app.py`; test `.venv/bin/python -m pytest
+  -v` → `passed`; criterion `met` ("pytest -v: tests/test_app.py::
+  test_triple PASSED; 3 passed in 0.01s"); `commit: null` — the worker
+  left the changes uncommitted; the dispatcher captured them in
+  `diff.patch` (exactly the two in-scope files).
+- Job: `succeeded`, `status_detail: scope_review_required` — the worker
+  created a `.venv/` in the worktree (system pip is PEP 668-managed) to
+  run pytest, and the scope check correctly flagged all 1982 `.venv/**`
+  paths as out-of-scope; **zero violations outside `.venv/`**. That is
+  the a18 semantics working as designed: the result stands, the primary
+  reviews the flag. (To keep the flag clean, a profile could ship a
+  pre-provisioned venv or add `.venv` to the allowed scope.)
+
+**`ClineAdapter.smoke_verified = True`** (flipped on this real pass, per
+PRD §9).
+
+## Adapter design (exercised by the live smoke)
 
 ```
 ccline --json --cwd <worktree> --auto-approve true --retries 1
@@ -127,11 +163,11 @@ ccline --json --cwd <worktree> --auto-approve true --retries 1
   (strace-verified 2026-10-17), so the wrapper is load-bearing, not a
   convenience.
 
-## Real smoke protocol (re-run — only gate: a freed backend)
+## Real smoke protocol (first run done — kept as re-run reference)
 
-The base-URL blocker is gone (ccline seeds it per attempt; no change to
-the user's Cline UI is needed — that config is for the interactive
-session only).
+First run 2026-10-17, PASSED (above). The base-URL blocker is gone
+(ccline seeds it per attempt; no change to the user's Cline UI is
+needed — that config is for the interactive session only).
 
 ```sh
 # 1. user frees tr4-secondary (strata, http://127.0.0.1:8080):
@@ -151,7 +187,6 @@ ladd job <job-id>                          # or watch the artifacts:
 ladd backend reserve tr4-secondary --note "Cline interactive session"
 ```
 
-Until a real pass is recorded in this file, `ClineAdapter.smoke_verified`
-stays `False` in code and the Claude Code adapter remains the supported
-worker path (PRD §15: do not delay a working release for unavailable Cline
-automation).
+A real pass is now recorded in this file; `ClineAdapter.smoke_verified`
+is `True`. The Cline adapter is a supported worker path alongside Claude
+Code (PRD §15).

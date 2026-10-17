@@ -38,13 +38,15 @@ Flag notes (all from `cline --help` 3.0.56):
   to its own tool protocol; the worker policy and result contract travel
   inside the task packet instead.
 
-Status: CONSTRUCTED and exercised end-to-end with a fake cline binary
-(tests/test_i_cline_adapter.py) through the real daemon. The base-URL
-mechanism is proven against the real cline 3.0.56 binary (ccline launcher
-oracle test: the run dials the seeded baseUrl — see docs/cline-status.md).
-The REAL model-level smoke is gated only on the user freeing tr4-secondary
-— per PRD §9 the outcome is reported verbatim, never faked, and
-smoke_verified flips only on a real pass.
+Status: VERIFIED. Fake-binary e2e (tests/test_i_cline_adapter.py) plus a
+REAL model-level smoke on 2026-10-17: job j_bba5405826 on tr4-secondary
+(strata, swift-1.5-iq3_xxs) — ccline seeded the per-attempt baseUrl, the
+run completed (finishReason "completed", 15 iterations, exit 0, valid
+result.json, tests passed). Verbatim evidence in docs/cline-status.md,
+per PRD §9. Known caveat: the worker created an out-of-scope .venv/ in
+the worktree to run pytest, which the scope check correctly flagged
+(scope_review_required) — harmless, but a profile could ship a
+pre-provisioned venv or `--scope .venv` to keep the flag clean.
 """
 
 from __future__ import annotations
@@ -76,7 +78,7 @@ def _timeout_s(profile_row: dict, cfg, job: dict) -> int:
 
 class ClineAdapter(WorkerAdapter):
     name = "cline"
-    smoke_verified = False  # flipped by docs/cline-status.md evidence, not by code
+    smoke_verified = True  # real pass 2026-10-17, j_bba5405826 — docs/cline-status.md
 
     def build(self, *, cfg, profile_row: dict, backend_cfg, backend_row: dict,
               job: dict, attempt_no: int, worktree: str, artifact_dir: str,

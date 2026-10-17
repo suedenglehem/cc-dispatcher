@@ -36,15 +36,20 @@ agents do the reasoning.
     attempt (~2.5 min, real model), valid result.json + diff (added `triple(a)`), commit
     97240a9, tests via `uv`. Host renamed i7→ak, IP 192.168.0.100→**192.168.0.33** (config +
     `/etc/hosts` note updated; served id == label so no case gate).
-  - **Cline smoke on tr4-secondary (strata): FAILED, root-caused, never faked** — attempt 1
-    exit 1, class `crash`, job `blocked(recovery_exhausted)`. The 401 came from
-    **`api.openai.com`, not strata**: strace of a manual Cline run (38× :443, 3× :53, 0× :8080,
-    SNI `api.openai.com`) proved Cline 3.0.56's `openai-compatible` provider reads the key from
-    `OPENAI_API_KEY` but the **base URL only from its stored provider config** — it ignores
-    `OPENAI_API_BASE`/`OPENAI_BASE_URL`. Fix is USER-side (Cline settings → Providers →
-    openai-compatible → Base URL = `http://127.0.0.1:8080/v1`); dispatcher path proven
-    end-to-end except that last hop. `ClineAdapter.smoke_verified` stays `False`. Verbatim
-    evidence + re-run protocol in `docs/cline-status.md`.
+  - **Cline smoke on tr4-secondary (strata): first attempt FAILED, root-caused,
+    dispatcher-side fix, RE-RAN — PASS** (2026-10-17, after the user freed the backend).
+    First attempt (`j_bc96773bee`) exit 1, class `crash`: the 401 came from
+    **`api.openai.com`, not strata** — strace proved Cline 3.0.56's `openai-compatible`
+    provider reads the **base URL only from its stored provider config** (ignores
+    `OPENAI_API_BASE`). Fix = the `ccline` launcher (below). Re-run
+    **`j_bba5405826` PASS**: attempt 1 exit 0 in ~1m45s; `ccline-auth.log` "Provider
+    configured: openai-compatible (swift-1.5-iq3_xxs)"; run dialed the seeded
+    `http://127.0.0.1:8080/v1` (run_result `finishReason: completed`, 15 iterations,
+    142845 input tokens); valid `result.json` (triple + test_triple, pytest 3 passed);
+    job `succeeded` with `scope_review_required` (worker's out-of-scope `.venv/`, 1982
+    paths, zero outside it — a18 semantics, correctly flagged). tr4-secondary
+    re-reserved after. **`ClineAdapter.smoke_verified = True`** (PRD §9: flipped on a
+    real pass). Verbatim evidence in `docs/cline-status.md`.
   - **Resource-group cap demo on real backends — DONE, both jobs SUCCEEDED (clean re-run,
     2026-10-17 20:31–20:37 CEST, post-fix daemon pid 33270)**: group `tr4` (max 1) spans
     tr4-secondary + ak. Job A2 `j_3092d3777e` (is_even) ran on tr4-secondary 18:31:21→18:33:26Z
@@ -339,11 +344,15 @@ agents do the reasoning.
    --data-dir <dir>` into the run's own isolated data-dir, then `exec cline <argv>`.
    Mechanism proven against the real cline 3.0.56 binary (refused-port oracle: the run
    dials the seeded URL; setting survives the run's own save). `cline-worker` profile
-   executable now `ccline` (config re-asserted on daemon restart). **REMAINING: the real
-   Cline smoke re-run — gate = user frees tr4-secondary** (`ladd backend release
-   tr4-secondary` AFTER any daemon restart); record outcome verbatim; on a real pass
-   flip `ClineAdapter.smoke_verified=True`; re-reserve after. Backends re-secured to
-   safe defaults after each demo (tr4-secondary reserved, ak disabled).
+   executable now `ccline` (config re-asserted on daemon restart).
+   **DONE (2026-10-17, user freed tr4-secondary): the real Cline smoke re-run PASSED** —
+   `j_bba5405826`, attempt 1, exit 0, ~1m45s; ccline seeded the per-attempt baseUrl
+   (`ccline-auth.log` + `providers.json` show `http://127.0.0.1:8080/v1`); run_result
+   `finishReason: completed`, 15 iterations; valid result.json (triple + test_triple,
+   pytest 3 passed); job `succeeded` with `scope_review_required` (worker's `.venv/`
+   only — zero violations outside it). `ClineAdapter.smoke_verified = True`; outcome
+   recorded verbatim in `docs/cline-status.md`; tr4-secondary re-reserved immediately
+   after. Backends re-secured to safe defaults (tr4-secondary reserved, ak disabled).
    **Suite 104 passed / 0 skipped** (the 102 + 2 new ccline-wrapper tests).
 5. Housekeeping (deferred): ~13 stale worktrees under
    `~/.local/share/local-dispatcher/worktrees/`; `/tmp/cline-seed-test*` scratch dirs.
