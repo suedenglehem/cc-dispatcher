@@ -15,24 +15,36 @@ Flag notes (all from `cline --help` 3.0.56):
 - `--auto-approve true`: unattended; `false` blocks on tool approval.
 - `-t <s>`: Cline's own timeout = the job's remaining deadline budget
   (the supervisor's deadline watchdog is the backstop).
+- The executable is the `ccline` launcher (bin/ccline, installed by
+  install.sh to /usr/local/bin/ccline; default `cline_executable`). Cline
+  reads the openai-compatible provider's baseUrl ONLY from the provider
+  config stored in its --data-dir — env OPENAI_API_BASE/OPENAI_BASE_URL
+  are NOT honored (strace-proven 2026-10-17: a fresh isolated data-dir
+  dials api.openai.com), and a run in a fresh data-dir with no stored
+  config fails. ccline therefore runs
+  `cline auth openai-compatible -b "$OPENAI_API_BASE" -m <model> -k ...
+  --data-dir <dir>` (the sanctioned baseUrl setter) into the run's own
+  isolated data-dir and then execs cline with the unchanged argv. This
+  adapter supplies exactly what ccline consumes: OPENAI_API_BASE /
+  OPENAI_API_KEY in env, --model and --data-dir in argv.
 - `--data-dir <artifact_dir>/cline-data`: per-attempt isolated state, so
   the worker never writes into the user's ~/.cline/data (where the live
-  interactive session's state lives). Provider CONFIG is still read from
-  the default `--config` (~/.cline) — that is where the
-  openai-compatible baseUrl lives, and Cline reading its own config is
-  normal operation. The dispatcher never reads that config (the provider
-  key stays in Cline's process; API-layer redaction keeps artifacts clean).
+  interactive session's state lives) and never needs it — the provider
+  config (including the provider key) is written into the isolated
+  data-dir by ccline itself. The dispatcher never reads ~/.cline
+  (API-layer redaction keeps artifacts clean regardless).
 - NO `--worktree`: the dispatcher owns worktree placement via `--cwd`.
 - No `-s` system-prompt override: Cline's native system prompt is tuned
   to its own tool protocol; the worker policy and result contract travel
   inside the task packet instead.
 
 Status: CONSTRUCTED and exercised end-to-end with a fake cline binary
-(tests/test_i_cline_adapter.py) through the real daemon. The REAL
-model-level smoke is gated on (a) the user freeing a worker backend and
-(b) Cline's stored openai-compatible model entry matching the served
-model — see docs/cline-status.md. Per PRD §9 the smoke outcome is
-reported verbatim, never faked.
+(tests/test_i_cline_adapter.py) through the real daemon. The base-URL
+mechanism is proven against the real cline 3.0.56 binary (ccline launcher
+oracle test: the run dials the seeded baseUrl — see docs/cline-status.md).
+The REAL model-level smoke is gated only on the user freeing tr4-secondary
+— per PRD §9 the outcome is reported verbatim, never faked, and
+smoke_verified flips only on a real pass.
 """
 
 from __future__ import annotations

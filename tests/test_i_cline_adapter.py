@@ -13,6 +13,9 @@ Cline's stored model entry — docs/cline-status.md, per PRD §9 never faked.
 from __future__ import annotations
 
 import datetime
+import os
+import pathlib
+import subprocess
 import types
 
 from local_dispatcher.adapters.base import StreamInfo
@@ -57,7 +60,7 @@ def _cfg_ns(root="/state/x", deadline_s=1800) -> types.SimpleNamespace:
 
 
 def _profile_row(**kw) -> dict:
-    base = {"executable": "/usr/local/bin/cline",
+    base = {"executable": "/usr/local/bin/ccline",
             "args": "[]", "env_overrides": "{}", "deadline_s": 1800}
     base.update(kw)
     return base
@@ -86,7 +89,7 @@ def test_cline_build_contract():
                      "packet": packet})
     cmd = launch.cmd
     assert launch.packet_via == "argv"
-    assert cmd[0] == "/usr/local/bin/cline"
+    assert cmd[0] == "/usr/local/bin/ccline"   # the baseUrl-seeding launcher
     assert cmd[-1] == packet                      # positional prompt
     assert "-p" not in cmd and "--plan" not in cmd  # -p is PLAN mode
     assert cmd[cmd.index("--auto-approve") + 1] == "true"
@@ -131,3 +134,104 @@ def test_cline_classify():
                        ctx_limit=None) == FailureClass.BACKEND_DISCONNECT.value
     assert ad.classify(exit_code=1, info=_info("some other crash"),
                        ctx_limit=None) == FailureClass.CRASH.value
+
+
+# -- the ccline launcher (bin/ccline) ----------------------------------------
+# Runs the REPO copy of the wrapper against a fake `cline` shim on PATH:
+# the shim records every invocation, so the test proves the wrapper seeds
+# the provider config (baseUrl/model/key/data-dir) BEFORE firing cline with
+# the unchanged original argv.
+
+REPO_CCLINE = pathlib.Path(__file__).resolve().parent.parent / "bin" / "ccline"
+
+_FAKE_CLINE = r"""#!/usr/bin/env bash
+{ printf '%s\0' "$@"; printf '\x01'; } >> "$CLINE_FAKE_LOG"
+if [ "${1:-}" = "auth" ]; then
+    d=""
+    for ((i=1; i<$#; i++)); do
+        [ "${!i}" = "--data-dir" ] && d="${!((i+1))}"
+    done
+    mkdir -p "$d/settings"
+    echo '{"version":1}' > "$d/settings/providers.json"
+    echo "Provider configured: openai-compatible (fake)"
+    exit 0
+fi
+echo '{"type":"result","ok":true}'
+exit 0
+"""
+
+
+def _run_ccline(tmp_path: pathlib.Path, argv: list[str], extra_env: dict,
+                drop_env: tuple[str, ...] = ()):
+    shim = tmp_path / "shim"
+    shim.mkdir(exist_ok=True)
+    fake = shim / "cline"
+    fake.write_text(_FAKE_CLINE)
+    fake.chmod(0o755)
+    env = dict(os.environ)
+    for k in drop_env:
+        env.pop(k, None)
+    env.update(extra_env)
+    env["PATH"] = str(shim) + os.pathsep + env["PATH"]
+    return subprocess.run([str(REPO_CCLINE), *argv], env=env,
+                          capture_output=True, text=True, timeout=30)
+
+
+def _calls(tmp_path: pathlib.Path) -> list[list[str]]:
+    raw = (tmp_path / "calls.log").read_bytes()
+    calls = []
+    for c in raw.split(b"\x01"):
+        if not c:
+            continue
+        if c.endswith(b"\0"):       # every record ends with a trailing NUL
+            c = c[:-1]
+        calls.append(c.split(b"\0"))
+    return calls
+
+
+def _argv_of(call: list[str]) -> list[str]:
+    return [x.decode() for x in call]
+
+
+def test_ccline_seeds_base_url_then_execs(tmp_path):
+    env = {"OPENAI_API_BASE": "http://127.0.0.1:8080/v1",
+           "OPENAI_API_KEY": "local",
+           "CLINE_FAKE_LOG": str(tmp_path / "calls.log")}
+    data_dir = str(tmp_path / "data")
+    argv = ["--json", "--cwd", "/tmp", "--auto-approve", "true",
+            "--data-dir", data_dir,
+            "--provider", "openai-compatible",
+            "--model", "swift-1.5-iq3_xxs", "say hi"]
+    r = _run_ccline(tmp_path, argv, env)
+    assert r.returncode == 0, r.stderr
+    calls = _calls(tmp_path)
+    assert len(calls) == 2, "expected exactly auth + run"
+    auth = _argv_of(calls[0])
+    assert auth[0] == "auth" and auth[1] == "openai-compatible"
+    assert auth[auth.index("-b") + 1] == "http://127.0.0.1:8080/v1"
+    assert auth[auth.index("-m") + 1] == "swift-1.5-iq3_xxs"
+    assert auth[auth.index("-k") + 1] == "local"
+    assert auth[auth.index("--data-dir") + 1] == data_dir
+    run = _argv_of(calls[1])
+    assert run == argv, "original argv must reach cline unchanged"
+    # the auth banner must not pollute the worker's JSON stdout stream
+    assert "Provider configured" not in r.stdout
+    assert (tmp_path / "data" / "ccline-auth.log").exists()
+
+
+def test_ccline_requires_base_url_and_datadir(tmp_path):
+    base = {"OPENAI_API_KEY": "local",
+            "CLINE_FAKE_LOG": str(tmp_path / "calls.log")}
+    argv = ["--data-dir", str(tmp_path / "d"), "--model", "m", "hi"]
+    r = _run_ccline(tmp_path, argv, base, drop_env=("OPENAI_API_BASE",))
+    assert r.returncode == 2 and "OPENAI_API_BASE" in r.stderr
+    r = _run_ccline(tmp_path, ["--model", "m", "hi"], base)
+    assert r.returncode == 2 and "data-dir" in r.stderr
+    # no key set -> auth runs WITHOUT -k, still succeeds
+    argv2 = ["--data-dir", str(tmp_path / "d2"), "--model", "m", "hi"]
+    env2 = {"OPENAI_API_BASE": "http://127.0.0.1:8080/v1",
+            "CLINE_FAKE_LOG": str(tmp_path / "calls.log")}
+    r = _run_ccline(tmp_path, argv2, env2, drop_env=("OPENAI_API_KEY",))
+    assert r.returncode == 0, r.stderr
+    auth = _argv_of(_calls(tmp_path)[0])
+    assert "-k" not in auth

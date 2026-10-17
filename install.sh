@@ -22,6 +22,15 @@ if [ ! -x "$VENV/bin/python" ]; then
     python3 -m venv "$VENV"
 fi
 "$VENV/bin/pip" install -q -e "$REPO"
+# cline launcher for openai-compatible worker backends (seeds the provider
+# baseUrl into each run's isolated --data-dir; see bin/ccline):
+if [ -w /usr/local/bin ]; then
+    cp "$REPO/bin/ccline" /usr/local/bin/ccline
+    chmod +x /usr/local/bin/ccline
+else
+    echo "    note: /usr/local/bin not writable — install the launcher manually:"
+    echo "          sudo cp $REPO/bin/ccline /usr/local/bin/ccline"
+fi
 
 echo "==> [2/4] config"
 mkdir -p "$CFG_DIR"

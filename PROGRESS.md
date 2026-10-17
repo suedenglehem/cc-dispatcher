@@ -23,9 +23,9 @@
   adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
   `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **102 passed, 0 skipped** (~100s) — 6 added with the P4-live bug fixes
+- Suite: **104 passed, 0 skipped** (~95s) — 6 added with the P4-live bug fixes
   (FK tombstone `test_i_backend_rename.py` ×2, `memory_references` numeric-id contract
-  `test_u_results.py` ×4)
+  `test_u_results.py` ×4) + 2 for the ccline wrapper (`test_i_cline_adapter.py`)
 
 ## P3 (recovery / restart / memory / failure injection) — COMPLETE
 Goal: all 20 acceptance tests green, using real subprocesses.
@@ -127,14 +127,19 @@ Live smokes — all run 2026-10-17 on freed backends, recorded verbatim, then re
   worker added `triple(a)` + test, 3 tests passed, commit `97240a9`. Proved the exact
   claude flag combo (stream-json + stdin + `--allowedTools` MCP names + result-file
   contract) against a real llama.cpp backend.
-- **Cline smoke — FAILED, root-caused, not faked** (`j_bc96773bee`, attempt 1, exit 1,
-  class `crash`, `recovery_exhausted`): Cline's `openai-compatible` provider reads its
-  base URL **only from the stored provider config**, ignoring `OPENAI_API_BASE`/
-  `OPENAI_BASE_URL` — strace shows 38×TCP :443 + SNI `api.openai.com`, 0× :8080. This is a
-  Cline-side settings defect, not a dispatcher defect. Full verbatim evidence + the user
-  fix (Base URL `http://127.0.0.1:8080/v1`, Model `swift-1.5-iq3_xxs`) are in
-  `docs/cline-status.md`. `ClineAdapter.smoke_verified` stays `False` until the user
-  applies that setting and the smoke is re-run and passes.
+- **Cline smoke — first attempt FAILED, root-caused, then FIXED dispatcher-side**
+  (`j_bc96773bee`, attempt 1, exit 1, class `crash`, `recovery_exhausted`): Cline's
+  `openai-compatible` provider reads its base URL **only from the stored provider
+  config** in its `--data-dir`, ignoring `OPENAI_API_BASE`/`OPENAI_BASE_URL` — strace
+  shows 38×TCP :443 + SNI `api.openai.com`, 0× :8080. Fix (2026-10-17): new
+  **`ccline` launcher** (`bin/ccline` → `/usr/local/bin/ccline`, installed by
+  `install.sh`) — runs `cline auth openai-compatible -b "$OPENAI_API_BASE" -m <model>
+  -k ... --data-dir <dir>` (the sanctioned baseUrl setter) into each attempt's isolated
+  data-dir, then `exec cline <argv>`; `cline-worker` profile executable now `ccline`.
+  Proven against real cline 3.0.56 (refused-port oracle: run dials the seeded URL,
+  setting survives the run's save). No user Cline-UI change is needed. Full evidence +
+  protocol in `docs/cline-status.md`. `ClineAdapter.smoke_verified` stays `False`
+  until the re-run passes.
 - **Resource-group cap demo — serialization proven live, BOTH jobs SUCCEEDED**
   (group `tr4`, max_concurrency=1; clean re-run 2026-10-17 20:31–20:37 CEST, post-fix
   daemon): job A2 (is_even, `j_3092d3777e`) on tr4-secondary 18:31:21→18:33:26Z held both
@@ -159,11 +164,14 @@ Two bugs found + fixed during the live smokes (both regression-tested, suite 96�
    float/dict/blank), and the packet RESULT_CONTRACT documents the field.
    `tests/test_u_results.py` (+4).
 
-Next unfinished task: **re-run the Cline smoke after the user sets the provider Base URL**
-(`http://127.0.0.1:8080/v1`) in `~/.cline` — record the outcome verbatim; flip
-`ClineAdapter.smoke_verified = True` only on a real pass. (Housekeeping: ~13 stale
-worktrees under `~/.local/share/local-dispatcher/worktrees/` from earlier demo jobs; pruning
-deferred.)
+Next unfinished task: **re-run the Cline smoke — the only gate is the user freeing
+tr4-secondary** (base-URL blocker removed by the `ccline` launcher): `ladd backend
+release tr4-secondary` (AFTER any daemon restart, which re-asserts the reservation),
+submit a tiny `cline-worker` job, record the outcome VERBATIM (exit code, stdout
+tail, result.json); flip `ClineAdapter.smoke_verified = True` only on a real pass;
+re-reserve tr4-secondary after. (Housekeeping: ~13 stale worktrees under
+`~/.local/share/local-dispatcher/worktrees/` from earlier demo jobs +
+`/tmp/cline-seed-test*` scratch dirs; pruning deferred.)
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

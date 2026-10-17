@@ -274,6 +274,15 @@ agents do the reasoning.
     supervisor dies the stream pipe's read end is gone; the result contract is file-based
     (`RESULT_PATH`/`CHECKPOINT_PATH`), so the worker keeps going and the re-adopting daemon
     takes the result file as the authority.
+- P4 cline base-URL fix: **`bin/ccline`** (new — launcher: `cline auth
+  openai-compatible -b $OPENAI_API_BASE -m <model> [-k key] --data-dir <dir>`
+  into the run's data-dir, then `exec cline <argv>`; auth log →
+  `<data-dir>/ccline-auth.log`; key never echoed), `install.sh` (installs it to
+  `/usr/local/bin`), `config.py` + `config.example.toml` + live `config.toml`
+  (`cline_executable = /usr/local/bin/ccline`), `adapters/cline.py` (docstring:
+  provider config comes from the ccline-seeded per-attempt data-dir, NOT
+  `~/.cline`), `docs/cline-status.md` (evidence table + new re-run protocol),
+  `tests/test_i_cline_adapter.py` (4→6)
 - P2 bug fixes: jobs.py PROFILE/BACKEND_UNKNOWN `known=` now serializes ids (was leaking live pydantic
   objects into ApiError → json.dumps crash in `_send`, dropped the connection with no job row); cli
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
@@ -289,9 +298,12 @@ agents do the reasoning.
   the RECOVERY_CONTEXT (checkpoint or uncertain marker + `from_attempt`) reached attempt 2's stdin
 - P3 step 5: `test_u_marker_scope.py` (2 unit: marker_owned truth table, real-process scan tag) +
   `test_i_orphan_scope.py` (1 integration: foreign instance's worker survives) green
-- P4: `test_i_cline_adapter.py` (4: e2e through the real daemon with a fake cline binary
+- P4: `test_i_cline_adapter.py` (6: e2e through the real daemon with a fake cline binary
   speaking the argv-prompt contract; build() contract — no plan-mode `-p`, `--auto-approve
-  true`, `--data-dir` under the artifact dir, `-t` = remaining budget; classify) green
+  true`, `--data-dir` under the artifact dir, `-t` = remaining budget; classify;
+  **ccline wrapper ×2 — real `bin/ccline` against a fake `cline` shim: auth args
+  (-b baseUrl / -m model / -k key / --data-dir) + unchanged-argv forwarding +
+  missing-data-dir / missing-OPENAI_API_BASE / no-key negatives**) green
 - Unit (53): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
   `classify` overflow-threshold (3), packet renderer, result validator + evaluate_attempt decision
   table + recovery-context bounding, migrations, event pruning, procfs identity/liveness, API redaction +
@@ -321,7 +333,17 @@ agents do the reasoning.
    `no_capacity` on idle ak → launched 11ms after the group slot freed → succeeded on ak;
    commits a1427ff / f6576d1); **(b) Cline on strata — attempted, FAILED at Cline's
    base-URL layer, root-caused via strace, recorded verbatim in `docs/cline-status.md`**.
-   The Cline re-run is BLOCKED on the USER setting Cline → Providers → `openai-compatible`
-   → **Base URL = `http://127.0.0.1:8080/v1`** (Model `swift-1.5-iq3_xxs`); on a real pass
-   flip `ClineAdapter.smoke_verified=True`, re-reserve tr4-secondary after. Backends
-   re-secured to safe defaults after each demo (tr4-secondary reserved, ak disabled).
+   **FIXED (2026-10-17, dispatcher-side — no user Cline-UI change needed):** new
+   `bin/ccline` launcher (installed `/usr/local/bin/ccline`; `install.sh` ships it):
+   runs `cline auth openai-compatible -b "$OPENAI_API_BASE" -m <model> -k ...
+   --data-dir <dir>` into the run's own isolated data-dir, then `exec cline <argv>`.
+   Mechanism proven against the real cline 3.0.56 binary (refused-port oracle: the run
+   dials the seeded URL; setting survives the run's own save). `cline-worker` profile
+   executable now `ccline` (config re-asserted on daemon restart). **REMAINING: the real
+   Cline smoke re-run — gate = user frees tr4-secondary** (`ladd backend release
+   tr4-secondary` AFTER any daemon restart); record outcome verbatim; on a real pass
+   flip `ClineAdapter.smoke_verified=True`; re-reserve after. Backends re-secured to
+   safe defaults after each demo (tr4-secondary reserved, ak disabled).
+   **Suite 104 passed / 0 skipped** (the 102 + 2 new ccline-wrapper tests).
+5. Housekeeping (deferred): ~13 stale worktrees under
+   `~/.local/share/local-dispatcher/worktrees/`; `/tmp/cline-seed-test*` scratch dirs.

@@ -43,7 +43,12 @@ deadline_s = 1800
 max_attempts = 2
 output_limit_chars = 8000
 claude_executable = "/home/andrei/.local/bin/claude"
-cline_executable = "/usr/local/bin/cline"
+# ccline = the dispatcher's launcher (bin/ccline, installed to
+# /usr/local/bin by install.sh): it seeds the openai-compatible provider's
+# baseUrl into the run's isolated --data-dir via `cline auth`, then execs
+# cline. Cline does not honor OPENAI_API_BASE in env; the stored baseUrl is
+# the only way a headless run reaches the local backend.
+cline_executable = "/usr/local/bin/ccline"
 # allowed_tools = [Bash, Read, Edit, Write, Glob, Grep, TodoWrite,
 #                  mcp__mycelium__recall, mcp__mycelium__save,
 #                  mcp__mycelium__context, mcp__mycelium__recent]

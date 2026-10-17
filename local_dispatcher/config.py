@@ -72,7 +72,7 @@ class WorkerConfig:
     max_attempts: int = 2
     output_limit_chars: int = 8000
     claude_executable: str = os.path.expanduser("~/.local/bin/claude")
-    cline_executable: str = "/usr/local/bin/cline"
+    cline_executable: str = "/usr/local/bin/ccline"
     allowed_tools: list[str] = field(default_factory=lambda: [
         "Bash", "Read", "Edit", "Write", "Glob", "Grep", "TodoWrite",
         "mcp__mycelium__recall", "mcp__mycelium__save",

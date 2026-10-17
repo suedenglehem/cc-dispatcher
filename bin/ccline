@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# ccline — launcher for headless Cline on an OpenAI-compatible backend.
+#
+# Why this exists: a cline run reads the openai-compatible provider's
+# baseUrl ONLY from the provider config stored in its --data-dir; the
+# OPENAI_API_BASE / OPENAI_BASE_URL environment variables are NOT honored
+# (strace-proven 2026-10-17: a fresh isolated data-dir dials
+# api.openai.com). The sanctioned way to set baseUrl is
+# `cline auth openai-compatible -b <url> ...`; this launcher performs that
+# step against the run's own --data-dir and then execs cline with the
+# original arguments.
+#
+# Required env:
+#   OPENAI_API_BASE   backend base URL, e.g. http://127.0.0.1:8080/v1
+#   OPENAI_API_KEY    provider key (optional: if unset, no -k is passed and
+#                     cline uses whatever key its config/env already has)
+# Arguments:
+#   all the normal cline arguments, including --data-dir <path> and
+#   --model <id> (must match the run's --model flag).
+#
+# The auth step's output goes to <data-dir>/ccline-auth.log, never stdout —
+# stdout belongs to cline's --json stream. The key is never echoed.
+set -euo pipefail
+
+data_dir=""
+model=""
+args=("$@")
+for i in "${!args[@]}"; do
+    case "${args[$i]}" in
+        --data-dir)   data_dir="${args[$((i+1))]:-}" ;;
+        --data-dir=*) data_dir="${args[$i]#--data-dir=}" ;;
+        --model)      model="${args[$((i+1))]:-}" ;;
+        -m)           model="${args[$((i+1))]:-}" ;;
+        --model=*)    model="${args[$i]#--model=}" ;;
+    esac
+done
+
+if [[ -z "$data_dir" ]]; then
+    echo "ccline: --data-dir <path> is required" >&2
+    exit 2
+fi
+if [[ -z "$model" ]]; then
+    echo "ccline: --model <id> is required (same value as the run's --model)" >&2
+    exit 2
+fi
+if [[ -z "${OPENAI_API_BASE:-}" ]]; then
+    echo "ccline: OPENAI_API_BASE must be set (e.g. http://127.0.0.1:8080/v1)" >&2
+    exit 2
+fi
+
+mkdir -p "$data_dir"
+
+# Seed the provider config (baseUrl/model/key) into the isolated data-dir.
+auth_args=(auth openai-compatible -b "$OPENAI_API_BASE" -m "$model"
+           --data-dir "$data_dir")
+if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+    auth_args+=(-k "$OPENAI_API_KEY")
+fi
+if ! cline "${auth_args[@]}" >"$data_dir/ccline-auth.log" 2>&1; then
+    echo "ccline: provider setup failed; see $data_dir/ccline-auth.log" >&2
+    exit 1
+fi
+
+exec cline "${args[@]}"

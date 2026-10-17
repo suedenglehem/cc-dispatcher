@@ -1,10 +1,12 @@
 # Cline adapter — status and compatibility diagnostics
 
 *Updated 2026-10-17 (P4). Verdict: **interface identified, adapter built and
-faked-tested, one real smoke attempted — failed at Cline's provider base-URL
-layer, root-caused, fix is on the Cline settings side**. Per PRD §9 the
-adapter does not claim Cline automation is complete — that claim requires a
-real pass, not yet recorded.*
+faked-tested; the one real-smoke failure (Cline's provider base-URL layer)
+was root-caused and fixed dispatcher-side by the `ccline` launcher**
+(`bin/ccline`, installed to `/usr/local/bin/ccline`). The base-URL mechanism
+is proven against the real cline 3.0.56 binary. Per PRD §9 the adapter does
+not claim Cline automation is complete — that claim requires a real
+model-level pass on a freed backend, not yet recorded.*
 
 ## Verified on this machine (evidence)
 
@@ -20,9 +22,11 @@ real pass, not yet recorded.*
     `-t/--timeout <s>`, `--config <path>` (default `~/.cline`),
     `--data-dir <path>` (default `~/.cline/data`), `--worktree`.
 - `local_dispatcher/adapters/cline.py` is built using only verified flags.
-  `tests/test_i_cline_adapter.py` (4 tests, green) drives it through the
+  `tests/test_i_cline_adapter.py` (6 tests, green) drives it through the
   real daemon — build/spawn/stream/result-validation — with a fake binary
-  speaking Cline's argv-prompt contract (`FAKE_PROMPT_FROM=argv`).
+  speaking Cline's argv-prompt contract (`FAKE_PROMPT_FROM=argv`), plus
+  two tests that run the real `bin/ccline` wrapper against a fake `cline`
+  shim (auth args + unchanged-argv forwarding).
 
 ## Real smoke — 2026-10-17 attempt (verbatim, per PRD §9)
 
@@ -52,32 +56,59 @@ strata accepts `Bearer local` and even no key), but takes the base URL
 3× DNS :53, **0× :8080**, TLS SNI = `api.openai.com`. The 401 comes
 back from OpenAI's real API, not from strata.
 
-**The fix is on the Cline side (user action, `~/.cline` is off-limits
-to the dispatcher by redaction policy):** in Cline settings →
-Providers → `openai-compatible`, set **Base URL** to
-`http://127.0.0.1:8080/v1` (Model `swift-1.5-iq3_xxs`). Until then the
-dispatcher-side path is proven end-to-end except the last network hop.
-This is the PRD's "report unsupported clearly" path, not a dispatcher
-defect; `ClineAdapter.smoke_verified` stays `False`.
+**The fix — dispatcher-side, the `ccline` launcher (proven, 2026-10-17):**
+worker runs no longer depend on the user's `~/.cline` provider settings
+at all (and the dispatcher still never reads them). The profile's
+executable is now `ccline` (`bin/ccline` → `/usr/local/bin/ccline`,
+installed by `install.sh`), which, for each attempt:
+
+1. runs `cline auth openai-compatible -b "$OPENAI_API_BASE" -m <model>
+   -k "$OPENAI_API_KEY" --data-dir <artifact_dir>/cline-data` — the
+   sanctioned baseUrl setter — writing `settings.providers
+   .openai-compatible.{baseUrl, model, apiKey}` into the run's own
+   isolated data-dir (auth output → `cline-data/ccline-auth.log`);
+2. `exec cline <original argv unchanged>`.
+
+**Why the env var was not enough — and why seeding the file by hand
+is not either (all strace-proven in scratch data-dirs, `~/.cline`
+untouched):**
+
+| Attempt | What dialed | Outcome |
+|---|---|---|
+| env `OPENAI_API_BASE` only | 38× :443, SNI `api.openai.com`, 0× :8080 | 401 from OpenAI's real API (the failed smoke above) |
+| hand-written `providers.json` with baseUrl + `--provider/--model` flags | 44–46× :443, 0× seeded port | Cline's startup save **replaces** the settings with the flag-derived `{provider, model}` — baseUrl clobbered |
+| hand-written file, no flags | `cline` provider (Cline-account auth) | "Unauthorized … re-authenticate your Cline account" |
+| **`cline auth`-seeded file (what ccline does)** | **3× the seeded URL** | "Cannot connect to API … (ConnectionRefused)" against a deliberately refused port — i.e. the run **dialed the configured baseUrl**, and the setting survived the run's own save |
+
+The oracle run (through `/usr/local/bin/ccline`, real cline 3.0.56,
+`OPENAI_API_BASE=http://127.0.0.1:9/v1` — nothing listens on :9): exit 1,
+3 connects to :9, 0× :8080; post-run `providers.json` still held
+`baseUrl: http://127.0.0.1:9/v1` + `apiKey: local`. With strata's real
+base URL (`http://127.0.0.1:8080/v1`) the same path is expected to reach
+the model; that is the pending real smoke. `ClineAdapter.smoke_verified`
+stays `False` until it passes.
 
 ## Adapter design (what a live smoke would exercise)
 
 ```
-cline --json --cwd <worktree> --auto-approve true --retries 1
-      --thinking low --compaction basic -t <remaining job budget>
-      --data-dir <artifact_dir>/cline-data
-      --provider openai-compatible --model <served id>  <task packet>
+ccline --json --cwd <worktree> --auto-approve true --retries 1
+       --thinking low --compaction basic -t <remaining job budget>
+       --data-dir <artifact_dir>/cline-data
+       --provider openai-compatible --model <served id>  <task packet>
+       # (ccline = `cline auth openai-compatible -b $OPENAI_API_BASE ...`
+       #  into the run's data-dir, then exec cline with this argv)
 ```
 
 - **Isolation semantics (discovered at implementation time):**
-  - `--data-dir <artifact_dir>/cline-data` — per-attempt runtime state.
-    Workers never write into `~/.cline/data`, so the live interactive
-    session's state is untouched.
-  - `--config` stays at the default `~/.cline`: the provider's baseUrl is
-    resolvable only from the user's config, and Cline reading its own
-    config is normal operation. The **dispatcher never reads
-    `~/.cline/data`** (it holds a provider key); the key stays inside the
-    Cline process and API-layer redaction keeps artifacts clean.
+  - `--data-dir <artifact_dir>/cline-data` — per-attempt runtime state
+    **and** the provider config location: `ccline` seeds
+    baseUrl/model/key there via `cline auth` before the run. Workers
+    never write into (or need) `~/.cline/data`, so the live interactive
+    session is fully self-contained and untouched.
+  - `--config` stays at the default `~/.cline`; the **dispatcher never
+    reads `~/.cline/data`** (it holds a provider key) — the worker's key
+    travels in its env and is stored only under the per-attempt artifact
+    dir; API-layer redaction keeps artifacts clean.
   - No `--worktree` — the dispatcher owns worktree placement via `--cwd`.
   - No `-s` system-prompt override — Cline's native system prompt is tuned
     to its own tool protocol; the worker policy and result contract travel
@@ -88,30 +119,35 @@ cline --json --cwd <worktree> --auto-approve true --retries 1
   error-text patterns (`token limit` / `exceed` / `context_length`), and
   `-t` + the supervisor deadline are the context/budget backstops.
 - **env:** explicit `OPENAI_API_BASE` (= backend `openai_base_url` or
-  `<endpoint>/v1`) + `OPENAI_API_KEY` from the backend's
-  `credential_env` (default `local`); never the primary session's env.
-  **Caveat (strace-verified 2026-10-17):** Cline 3.0.56's
-  `openai-compatible` provider reads the key from `OPENAI_API_KEY` but
-  the base URL only from its stored provider config — the
-  `OPENAI_API_BASE` export is harmless but ineffective there. The base
-  URL must live in Cline's provider settings.
+  `<endpoint>/v1`; for strata that is `http://127.0.0.1:8080/v1`) +
+  `OPENAI_API_KEY` from the backend's `credential_env` (default
+  `local`); never the primary session's env. Both are consumed by the
+  `ccline` launcher, which stores them in the run's data-dir — Cline
+  3.0.56 itself reads the base URL only from that stored config
+  (strace-verified 2026-10-17), so the wrapper is load-bearing, not a
+  convenience.
 
-## Real smoke protocol (re-run after the Cline Base URL fix)
+## Real smoke protocol (re-run — only gate: a freed backend)
+
+The base-URL blocker is gone (ccline seeds it per attempt; no change to
+the user's Cline UI is needed — that config is for the interactive
+session only).
 
 ```sh
-# 1. user: Cline settings → Providers → openai-compatible →
-#    Base URL = http://127.0.0.1:8080/v1  (Model swift-1.5-iq3_xxs).
-#    NOTE: a daemon restart re-asserts the config reservation, so:
-# 2. dispatcher: ladd backend release tr4-secondary
-# 3. dispatcher: submit + watch, same as before:
+# 1. user frees tr4-secondary (strata, http://127.0.0.1:8080):
+#    dispatcher: ladd backend release tr4-secondary
+#    (a daemon restart re-asserts the config reservation, so release
+#     AFTER any restart)
+# 2. submit + watch:
 ladd mode <project> team
 ladd submit "tiny verifiable task" <base-sha> cline-worker --scope src
 ladd job <job-id>                          # or watch the artifacts:
 #    ~/.local/share/local-dispatcher/artifacts/<job>/<n>/stream.log
-# 4. record the outcome here VERBATIM (exit code, stdout tail, result.json)
+#    (plus <n>/cline-data/ccline-auth.log for the provider setup step)
+# 3. record the outcome here VERBATIM (exit code, stdout tail, result.json)
 #    — pass or fail. Never summarize a pass that didn't happen.
 #    On a real pass: flip ClineAdapter.smoke_verified = True.
-# 5. re-reserve immediately:
+# 4. re-reserve immediately:
 ladd backend reserve tr4-secondary --note "Cline interactive session"
 ```
 
