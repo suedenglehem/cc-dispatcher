@@ -10,6 +10,10 @@ Launch log: when FAKE_LAUNCH_LOG is set, each run appends two JSON lines
 (phase=start / phase=end with a monotonic clock) — the oracle for
 no-overlap (test 3) and no-duplication (test 10) assertions.
 
+Packet echo: when FAKE_ECHO_PACKET is set, the normal (post-mode) path also
+writes the received packet to <artifacts>/echo_packet.txt — lets
+multi-attempt recovery tests inspect what attempt N actually received.
+
 Modes:
   normal                 valid result, exit 0
   hold                   sleep FAKE_HOLD_S, then normal (drain/cancel tests)
@@ -19,6 +23,8 @@ Modes:
                          FAKE_CTX_HOLD_S with the usage live, then normal
   crash_once             attempt 1: no checkpoint, exit 3; later: normal
   checkpoint_then_crash  attempt 1: checkpoint saved, exit 3; later: normal
+  backend_down           attempt 1: API-error result (connection refused),
+                         exit 1; later: normal
   invalid_report         always: exit 0 with no result file
   tests_fail             attempt 1: outcome=failed (tests failed); later: normal
   scope_violation        completed, but writes + reports a file outside scope
@@ -176,6 +182,12 @@ def _run() -> int:
                           "exceed the 92768 context length")})
         return 1
 
+    if mode == "backend_down" and n == 1:
+        _emit({"type": "result", "subtype": "error",
+               "is_error": True,
+               "result": "API Error: connection refused (backend unreachable)"})
+        return 1
+
     if mode in ("crash_once", "checkpoint_then_crash") and n == 1:
         if mode == "checkpoint_then_crash" and checkpoint_path:
             _atomic_write(checkpoint_path,
@@ -229,6 +241,11 @@ def _run() -> int:
         if result_path:
             _atomic_write(os.path.join(os.path.dirname(result_path),
                                        "echo_packet.txt"), packet)
+    elif os.environ.get("FAKE_ECHO_PACKET") and result_path:
+        # independent of mode: capture the packet on the normal (recovery)
+        # path too, so multi-attempt tests can inspect what the worker got
+        _atomic_write(os.path.join(os.path.dirname(result_path),
+                                   "echo_packet.txt"), packet)
     if mode == "echo_env":
         if result_path:
             keys = ("DISPATCHER", "DISPATCHER_JOB_ID", "DISPATCHER_ATTEMPT_ID",

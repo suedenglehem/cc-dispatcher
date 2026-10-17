@@ -15,9 +15,11 @@ agents do the reasoning.
 - P2 (MCP + primary UX): **complete** — mcp_adapter 8 tools done+tested, `claude mcp add dispatcher` done,
   full primary↔worker loop demonstrated live (submit → worker runs → primary ff-merges → `ladd integrate`
   accepted → drain to single). Backends restored to safe state. Suite 72 passed / 4 P3-skip.
-- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — step 1 done
-  (live 65% context warning + overflow evidence + both config knobs wired); next: step 2
-  (crash / checkpoint-then-crash e2e tests)
+- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — steps 1–2
+  done (2026-10-17): step 1 = live 65% context warning + overflow evidence + both config knobs
+  wired; step 2 = crash / checkpoint-then-crash / backend-disconnect / tests-fail recovery e2e
+  (`test_i_crash_recovery.py`, 4 tests, packet-level proof via `FAKE_ECHO_PACKET`). Next: step 3
+  (a10: real `dispatcherd` SIGKILL mid-job → restart → adopt, no duplicate)
 - P4 (Cline/hardening): **not started**
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
@@ -75,6 +77,11 @@ agents do the reasoning.
 - `prompts/` — PRD §17/§18/§19 verbatim + §20 packet template + result-schema.json
 - `config.example.toml`, `systemd/local-dispatcher.service`, `install.sh`, `pyproject.toml`, `.gitignore`
 - P2 new: `tests/test_mcp_adapter.py` (8 tools), `docs/commands.md` (§21 text)
+- P3 step 2: `tests/fakes/fake_worker.py` (`backend_down` mode + `FAKE_ECHO_PACKET` toggle —
+  echoes the received packet on the normal path so multi-attempt tests can inspect what
+  attempt N got), `tests/test_i_crash_recovery.py` (new, 4: crash→uncertain-recovery→succeed,
+  checkpoint-then-crash→certain-recovery→succeed, backend_down→backend_disconnect→retry→succeed,
+  tests_fail→non-retryable failed)
 - P3 step 1: `results.py` (`context_pct` helper), `supervisor.py` (`Child.context_warned`),
   `adapters/{base,claude,cline}.py` (`classify` gains `overflow_pct`), `scheduler.py`
   (`live_context` + `_context_watch` one-shot `context_warning` event; classify + `usage_json`
@@ -86,11 +93,13 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **81 passed, 4 skipped** (~60s) — skips = a10 (real dispatcherd restart) + a14/a15/a16 (real
+- pytest: **85 passed, 4 skipped** (~60s) — skips = a10 (real dispatcherd restart) + a14/a15/a16 (real
   mycelium subprocess) — all P3-gated
 - Acceptance a01–a09, a11–a13, a17–a20 (18): green with fakes; P2 mcp_adapter (8): green
 - P3 step 1: `test_i_context_warning.py` (2 integration: live view + one-shot `context_warning` event +
   durable `usage_json` evidence; below-threshold negative) green
+- P3 step 2: `test_i_crash_recovery.py` (4 integration) green — incl. packet-level assertion that
+  the RECOVERY_CONTEXT (checkpoint or uncertain marker + `from_attempt`) reached attempt 2's stdin
 - Unit (53): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
   `classify` overflow-threshold (3), packet renderer, result validator + evaluate_attempt decision
   table + recovery-context bounding, migrations, event pruning, procfs identity/liveness, API redaction +
@@ -106,12 +115,9 @@ agents do the reasoning.
   old daemon — superseded; see the 143 section.
 
 ## Next steps
-1. P3 step 2: crash / checkpoint-then-crash recovery e2e tests — the fake-worker modes `crash_once`,
-   `checkpoint_then_crash`, `tests_fail` exist but are undriven; add crash→retry-succeeds,
-   checkpoint-then-crash→attempt 2 with CERTAIN recovery context (`uncertain=false`), tests_fail→failed.
-   (Overflow recovery is already covered by a09.)
-2. P3 step 3: a10 — real `dispatcherd` SIGKILL mid-job → restart → adopt, no duplicate, capacity
-   reconciled; then step 4 mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
+1. P3 step 3: a10 — real `dispatcherd` subprocess SIGKILL mid-job → restart → adopt, no duplicate,
+   capacity reconciled (procfs identity `pid+pgid+starttime` + marker scan; a10 currently skips).
+   Then step 4 mycelium (a14/a15/a16 real `mycelium serve` under `MYCELIUM_CONFIG`→temp
    store, user store untouched) + promote; step 5: scope startup_reconcile orphan-kill to own instance
    (see Known footgun). → ALL 20 acceptance green.
-3. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.
+2. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.

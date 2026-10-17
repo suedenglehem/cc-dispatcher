@@ -22,8 +22,8 @@
 - **Green with fakes (18):** a01–a09, a11–a13, a17–a20
 - **P3-gated (4, need real subprocesses):** a10 (real `dispatcherd` SIGKILL → adopt, no duplicate),
   a14/a15/a16 (real `mycelium serve` under `MYCELIUM_CONFIG` → temp store)
-- Non-acceptance P3: `test_i_context_warning.py` (2, green)
-- Suite: **81 passed, 4 skipped** (skips = the 4 P3-gated above)
+- Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
+- Suite: **85 passed, 4 skipped** (skips = the 4 P3-gated above)
 
 ## Current milestone: P3 (recovery / restart / memory / failure injection)
 Goal: all 20 acceptance tests green, using real subprocesses.
@@ -38,10 +38,20 @@ New tests: `test_u_ctx.py` (+7 unit: context_pct math/boundary/unknown, classify
 `test_i_context_warning.py` (+2 integration: live view + one-shot event + durable evidence;
 below-threshold negative). Fake worker gained `high_context` mode (+`FAKE_USAGE_TOKENS`,
 `FAKE_CTX_HOLD_S`).
+**Step 2 done (2026-10-17)** — recovery e2e for the previously-undriven fake modes,
+`tests/test_i_crash_recovery.py` (4): `crash_once` → `crash` → retry in the SAME worktree
+with an UNCERTAIN recovery context (`uncertain=true`, no checkpoint) → attempt 2 succeeds;
+`checkpoint_then_crash` → attempt 2 gets a CERTAIN context (`uncertain=false`,
+`checkpoint.status=in_progress`) → succeeds; new `backend_down` mode → `backend_disconnect`
+(API-error text pattern) → retried like a crash → succeeds; `tests_fail` → `tests_failed`,
+non-retryable (`allow_test_repair=0`) → job failed on attempt 1, result preserved. The
+profile toggle `FAKE_ECHO_PACKET` makes attempt 2 dump its received packet, so the tests
+assert the recovery section (checkpoint / "NO CHECKPOINT WAS SAVED" + `from_attempt`)
+reached the worker's STDIN, not just the DB row.
 Remaining:
 1. ~~stream-json usage tracking + 65% context warning + overflow evidence~~ ✅
-2. checkpoint contract + context-overflow / crash / backend-disconnect recovery
-   (`RECOVERY_CONTEXT` = latest checkpoint + bounded diff; **fresh session, never `--resume`**)
+2. ~~checkpoint contract + context-overflow / crash / backend-disconnect recovery~~ ✅
+   (a09 = overflow; step 2 = crash / checkpoint-then-crash / backend-disconnect / tests-fail)
 3. procfs startup reconcile + quarantine — a10: real `dispatcherd` SIGKILL mid-job → restart →
    adopt (no duplicate), capacity reconciled
 4. mycelium client + packet memory injection + envelope + outage degrade + promote
@@ -49,11 +59,11 @@ Remaining:
 5. Hardening: scope `startup_reconcile` orphan-kill to the instance's own db/lock
    (the global `/proc` marker-scan footgun — see HANDOFF.md "Known footgun")
 
-Next unfinished task: P3 step 2 — crash / checkpoint-then-crash recovery e2e tests: the
-fake-worker modes `crash_once`, `checkpoint_then_crash`, `tests_fail` exist but no test drives
-them yet; add: crash → retry in same worktree succeeds; checkpoint-then-crash → attempt 2 gets
-a CERTAIN recovery context (`uncertain=false`, checkpoint present) and succeeds; tests_fail →
-failed (non-retryable). Then step 3 (a10 real-dispatcherd reconcile).
+Next unfinished task: P3 step 3 — a10 with a real `dispatcherd` subprocess: SIGKILL mid-job →
+restart → adoption with no duplicate execution, capacity reconciled (procfs identity
+`pid+pgid+starttime` + marker scan). The a10 test currently skips (P3-gated); it needs the
+real-subprocess fixture per the plan's "Process model" note. Then step 4 (mycelium a14/15/16)
+and step 5 (scope the orphan-kill).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
