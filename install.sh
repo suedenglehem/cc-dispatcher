@@ -5,7 +5,7 @@
 #   2. ~/.config/local-dispatcher/config.toml (from config.example.toml,
 #      only if not present — never overwrites an existing config)
 #   3. systemd user unit + daemon-reload
-#   4. optional: start the daemon, register the MCP forwarder (Phase 2)
+#   4. optional: start the daemon, register the MCP forwarder
 #
 # Safe to re-run. Never touches ~/.cline, ~/.mycelium, or running sessions.
 set -euo pipefail
@@ -52,6 +52,9 @@ Next:
   ladd mode <project> team          # only when a worker backend is free
   ladd submit "objective" <base> cc-worker --scope <path>
 
-The MCP forwarder (dispatcher-mcp) lands in Phase 2:
-  claude mcp add dispatcher -- /dd2/andrei/claude/dispatcher/.venv/bin/dispatcher-mcp
+MCP forwarder for the primary session (user scope):
+  claude mcp add dispatcher -- $VENV/bin/dispatcher-mcp
+
+Docs: docs/setup.md  docs/recovery.md  docs/troubleshooting.md
+      docs/commands.md  docs/cline-status.md  docs/mycelium-notes.md
 EOF

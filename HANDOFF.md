@@ -15,19 +15,27 @@ agents do the reasoning.
 - P2 (MCP + primary UX): **complete** — mcp_adapter 8 tools done+tested, `claude mcp add dispatcher` done,
   full primary↔worker loop demonstrated live (submit → worker runs → primary ff-merges → `ladd integrate`
   accepted → drain to single). Backends restored to safe state. Suite 72 passed / 4 P3-skip.
-- P3 (recovery/memory/failure injection; all 20 acceptance tests): **in progress** — steps 1–4
-  done (2026-10-17): step 1 = live 65% context warning + overflow evidence + both config knobs
+- P3 (recovery/memory/failure injection; all 20 acceptance tests): **complete (2026-10-17)** —
+  steps 1–5: step 1 = live 65% context warning + overflow evidence + both config knobs
   wired; step 2 = crash / checkpoint-then-crash / backend-disconnect / tests-fail recovery e2e
   (`test_i_crash_recovery.py`, 4 tests, packet-level proof via `FAKE_ECHO_PACKET`); step 3 =
   a10 green with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart → adopt, no
   duplicate, capacity reconciled, flock negative control); step 4 = mycelium client (long-lived
   stdio child, respawn-once, single-flight, outage-degrade), `ladd promote`, and a14/a15/a16
   green with a REAL `mycelium serve` under `MYCELIUM_CONFIG` → temp store (user store untouched)
-  — **20/20 acceptance tests green**. Step 5 (hardening) done: the
-  `startup_reconcile` orphan-kill is scoped to the instance's own state dir
-  (`DISPATCHER_STATE_DIR` worker tag; foreign markers recorded, never killed) —
-  **full suite 92 passed / 0 skipped**
-- P4 (Cline/hardening): **not started**
+  — **20/20 acceptance tests green**; step 5 (hardening) = the `startup_reconcile` orphan-kill
+  scoped to the instance's own state dir (`DISPATCHER_STATE_DIR` worker tag; foreign markers
+  recorded, never killed) — **full suite 92 passed / 0 skipped**
+- P4 (Cline/docs/hardening): **in progress (2026-10-17)** — Cline adapter verified against
+  `cline --help` 3.0.56 (found + fixed two draft bugs: `-p` is PLAN mode, removed;
+  `--auto-approve false` would hang, now `true`; added `-t` remaining-budget and per-attempt
+  `--data-dir` isolation) + 4 tests driving it through the real daemon with a fake binary
+  (`test_i_cline_adapter.py`). Full docs set written: setup, recovery, troubleshooting,
+  mycelium-notes, cline-status; config example gained the cline profile. **Live Cline smoke
+  GATED** (both worker backends reserved/disabled for live interactive sessions + Cline's
+  stored model entry ≠ served model) — verdict + exact unblock protocol documented in
+  `docs/cline-status.md` per PRD §9 (never faked). i7 enable GATED on the user freeing it.
+  **full suite 96 passed / 0 skipped**
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
 - Symptom: 4 daemon-spawned workers on the OLD daemon (pid 16445) died exit 143 (SIGTERM, class=crash),
@@ -79,6 +87,34 @@ agents do the reasoning.
 - **Never read/echo `~/.cline/data`** (provider secret). Never touch the two interactive sessions.
 - **Post-restart ops:** config reasserts on daemon start — after ANY restart, re-release tr4-secondary and
   re-enable i7 if workers should run on them. `pgrep -af local-dispatcher` finds the daemon (not `dispatcherd`).
+
+## Changed files (P4 — Cline adapter + full docs)
+- `local_dispatcher/adapters/cline.py` — rewritten on the `cline --help` 3.0.56 evidence:
+  prompt = positional argv (act mode; NO `-p` plan-mode flag), `--auto-approve true`,
+  `--retries 1`, `--thinking low`, `--compaction basic`, `-t <remaining job budget>`
+  (`_timeout_s`, fallback = effective deadline), `--data-dir <artifact_dir>/cline-data`
+  (per-attempt state isolation; `--config` stays default so the provider baseUrl resolves;
+  the dispatcher NEVER reads `~/.cline/data`), no `--worktree`, no `-s`; env = explicit
+  `OPENAI_API_BASE`/`OPENAI_API_KEY` + marker vars incl. `DISPATCHER_STATE_DIR`;
+  `classify` fixed (was an unused-loop-var pattern) + `fetch failed`/`etimedout` patterns
+- `tests/fakes/fake_worker.py` — `FAKE_PROMPT_FROM=argv` contract (prompt = last argv
+  element) alongside the stdin contract; one fake serves both adapters
+- `tests/test_i_cline_adapter.py` (NEW, 4 tests) — e2e (fake cline through the real daemon
+  → succeeded; the valid result file proves the argv packet carried `RESULT_PATH`),
+  build() contract, `-t` remaining-budget math, classify table
+- `docs/setup.md` (NEW) — install/config/systemd/first-run/MCP + the backend enablement
+  protocol; `docs/recovery.md` (NEW) — reconcile table incl. foreign-marker scoping,
+  retryable classes, quarantine/reconcile, blocked-job table, SIGKILL drill;
+  `docs/troubleshooting.md` (NEW) — 11 failure classes + operational issues;
+  `docs/mycelium-notes.md` (NEW) — daemon client, worker allowlist, envelope, promote,
+  security (no auth → never expose, DBs off network shares); `docs/cline-status.md` (NEW) —
+  the PRD §9 verdict: verified flags, NOT real-model-verified, both gates, smoke protocol
+- `config.example.toml` — commented `cline-worker` profile; `install.sh` — stale "Phase 2"
+  MCP note replaced with the real `claude mcp add` line + docs pointers
+- Docs ground-truth cross-checked against the live tree: `ladd`/`ladd backend`/`ladd
+  project` help, FailureClass enum + RETRYABLE set, all 26 emitted event names,
+  `status_detail` values, console scripts (`ladd`, `local-dispatcher`, `dispatcher-mcp`),
+  live `~/.config/local-dispatcher/config.toml` `[mycelium]` shape (example now matches)
 
 ## Changed files (P3 step 5 — orphan-kill scoping)
 - `local_dispatcher/adapters/{claude,cline}.py`: worker env gains
@@ -182,7 +218,7 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **92 passed, 0 skipped** (~92s) — **20/20 acceptance tests green**
+- pytest: **96 passed, 0 skipped** (~95s) — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
   (temp store, user `~/.mycelium` untouched — 1.9s / 4.4s / 2.3s); P2 mcp_adapter (8): green
@@ -192,6 +228,9 @@ agents do the reasoning.
   the RECOVERY_CONTEXT (checkpoint or uncertain marker + `from_attempt`) reached attempt 2's stdin
 - P3 step 5: `test_u_marker_scope.py` (2 unit: marker_owned truth table, real-process scan tag) +
   `test_i_orphan_scope.py` (1 integration: foreign instance's worker survives) green
+- P4: `test_i_cline_adapter.py` (4: e2e through the real daemon with a fake cline binary
+  speaking the argv-prompt contract; build() contract — no plan-mode `-p`, `--auto-approve
+  true`, `--data-dir` under the artifact dir, `-t` = remaining budget; classify) green
 - Unit (53): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
   `classify` overflow-threshold (3), packet renderer, result validator + evaluate_attempt decision
   table + recovery-context bounding, migrations, event pruning, procfs identity/liveness, API redaction +
@@ -215,4 +254,11 @@ agents do the reasoning.
 3. ~~P3 step 5 (hardening): scope `startup_reconcile` orphan-kill to the instance's own
    db/lock~~ ✅ DONE (2026-10-17) — `DISPATCHER_STATE_DIR` worker tag; foreign markers
    recorded + never killed; suite 92 passed / 0 skipped.
-4. P4: Cline smoke → pass or `docs/cline-status.md` (never faked), resource-group demo, full docs + install.sh.
+4. P4 (in progress, 2026-10-17): Cline adapter done (verified flags, 4 tests, `smoke_verified=False`
+   until a live pass) + full docs set + config example. Remaining, ALL GATED on the user freeing
+   a backend: (a) live Cline smoke per the protocol in `docs/cline-status.md` (also needs Cline's
+   stored `openai-compatible` model entry to match the served id) → record the verbatim outcome,
+   flip `smoke_verified` only on a real pass; (b) i7: `ladd backend enable i7` + 1-token
+   `ladd backend check i7` (label case), then re-disable; (c) resource-group demo on real
+   backends (group cap itself already covered by acceptance a04 with fakes). After each demo:
+   re-reserve/disable the backend.

@@ -16,16 +16,16 @@
 | P1 | Real-model smoke (real claude worker on a freed backend) | ✅ done |
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
-| P4 | Cline adapter, resource-group demo, hardening, full docs + install | ⬜ not started |
+| P4 | Cline adapter, resource-group demo, hardening, full docs + install | 🔶 in progress (adapter + docs done; live smokes gated) |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
   adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
   `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **92 passed, 0 skipped** (~92s)
+- Suite: **96 passed, 0 skipped** (~95s)
 
-## Current milestone: P3 (recovery / restart / memory / failure injection)
+## P3 (recovery / restart / memory / failure injection) — COMPLETE
 Goal: all 20 acceptance tests green, using real subprocesses.
 Status: **ALL 5 STEPS DONE (2026-10-17) — 20/20 acceptance green, 92 passed / 0 skipped**.
 Step 1 — stream-json usage tracking was already wired
@@ -100,9 +100,39 @@ Remaining:
    still succeeds). `Env._write_toml(root=...)` for the second state dir. Suite 92 passed /
    0 skipped (~92s).
 
-Next unfinished task: P4 — Cline smoke (pass or documented exact failure in
-`docs/cline-status.md`, never faked), resource-group demo, full docs + install.sh; i7
-backend enable gated on the user freeing it (+ 1-token `ladd backend check` for label case).
+## Current milestone: P4 (Cline, resource groups, full docs)
+Status: **in progress (2026-10-17)** — adapter + docs done; live smokes gated on the user
+freeing a backend.
+
+1. ~~Cline adapter~~ ✅ (2026-10-17) — flags verified against `cline --help` 3.0.56
+   (positional prompt = act mode; two draft bugs fixed: `-p` is PLAN mode → removed,
+   `--auto-approve false` would hang unattended → `true`); added `-t` = remaining job
+   budget and per-attempt `--data-dir <artifact_dir>/cline-data` (worker never touches
+   `~/.cline/data`; dispatcher never reads it — provider key stays in Cline's process);
+   `tests/test_i_cline_adapter.py` (4: e2e through the real daemon with a fake binary
+   speaking the argv-prompt contract, build() contract, timeout math, classify).
+   `ClineAdapter.smoke_verified` stays `False` — PRD §9: no real smoke, no "complete".
+2. ~~Full docs~~ ✅ — `docs/setup.md`, `docs/recovery.md`, `docs/troubleshooting.md`,
+   `docs/mycelium-notes.md`, `docs/cline-status.md` (the PRD §9 verdict + exact unblock
+   protocol); `docs/commands.md` already shipped verbatim §21; `config.example.toml`
+   gained the commented `cline-worker` profile; `install.sh` stale "Phase 2" note fixed.
+   All doc facts cross-checked against the live tree (CLI help, FailureClass + RETRYABLE,
+   26 event names, status_detail values, console scripts, live config shape).
+3. Suite: **96 passed, 0 skipped** (~95s); 20/20 acceptance still green.
+
+Remaining — ALL gated on the user freeing a backend (re-reserve/disable after each):
+- Live Cline smoke: pass or documented exact failure in `docs/cline-status.md`
+  (NEVER faked); also needs Cline's stored `openai-compatible` model entry to match the
+  served id. Protocol is in that doc; record the outcome verbatim; flip `smoke_verified`
+  only on a real pass.
+- i7: `ladd backend enable i7` + 1-token `ladd backend check i7` (label case
+  `local-metrics` ↔ `qwen3.8-27b`), re-disable after.
+- Resource-group demo on real backends (group cap itself is already covered by
+  acceptance a04 with fakes).
+
+Next unfinished task: the three gated live smokes above — nothing in P4 is buildable
+without a freed backend; when the user frees one, start with the Cline smoke protocol in
+`docs/cline-status.md`.
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
@@ -110,7 +140,8 @@ backend enable gated on the user freeing it (+ 1-token `ladd backend check` for 
 - `invalid_result`: no auto-retry (needs a `ladd resume` decision)
 - 8th MCP tool `dispatch_integrate` added (PRD's tool list was "proposed")
 - Deadline = total job budget from first spawn; no attempt may start with <60s remaining
-- SIGTERM / `ladd stop`: stop the scheduler, **leave workers running** (re-adopted on restart)
+- SIGTERM (`systemctl --user stop`; there is no `ladd stop`): stop the scheduler,
+  **leave workers running** (re-adopted on restart)
 - Runtime `ladd backend ...` changes are live-only; config reasserts on the next daemon start (safety property)
 - API wire: newline-JSON over a Unix socket (0600); credential redaction; 8k response cap
 - **Worker-death 143 (external SIGTERM): SUSPENDED** — not reproducible on the current daemon;

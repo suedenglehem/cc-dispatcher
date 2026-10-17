@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Fake worker: speaks the exact argv/stdin contract the claude adapter
 builds (see local_dispatcher/adapters/claude.py) and emits stream-json lines.
+With FAKE_PROMPT_FROM=argv it speaks the cline contract instead (prompt as
+the positional argv element; see local_dispatcher/adapters/cline.py).
 
 Behavior is selected by FAKE_WORKER_MODE plus the attempt number parsed from
 DISPATCHER_ATTEMPT_ID ("...-a<n>"), so multi-attempt scenarios (overflow →
@@ -230,7 +232,11 @@ def main() -> int:
 
 def _run() -> int:
     packet = ""
-    if not sys.stdin.isatty():
+    if os.environ.get("FAKE_PROMPT_FROM") == "argv":
+        # cline adapter contract: the prompt is the positional argv element
+        if len(sys.argv) > 1:
+            packet = sys.argv[-1]
+    elif not sys.stdin.isatty():
         packet = sys.stdin.read()
 
     result_path = checkpoint_path = None

@@ -106,6 +106,17 @@ max_attempts = 2
 output_limit_chars = 8000
 # allow_test_repair = false
 
+# Cline worker (P4). Headless interface verified against cline 3.0.56
+# --help; the REAL model smoke is gated (backend free + Cline's stored
+# openai-compatible model entry matching model_id) — docs/cline-status.md.
+# [[profiles]]
+# id = "cline-worker"
+# adapter = "cline"
+# # executable defaults to [worker] cline_executable
+# backend_ids = ["tr4-secondary"]
+# deadline_s = 1800
+# max_attempts = 2
+
 # Projects can be listed here or added at runtime: `ladd project add`.
 # [[projects]]
 # id = "demo"
