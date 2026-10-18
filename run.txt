@@ -50,26 +50,38 @@ tr4-secondary :8080 is reserved for the interactive Cline session.
                                                    # and are re-adopted on next start
 
 6. USE IT IN A DIFFERENT PROJECT (e.g. /dd2/andrei/docker/vast)
-   One-time, per repo — the folder must be a git repository:
+   ONE-TIME per repo — a single terminal command, daemon running; the
+   folder must be a git repository:
       ladd project add vast /dd2/andrei/docker/vast \
           --integration-ref main \
           --mycelium-project vast
-      # --integration-ref = the branch you merge dispatch/* into;
-      #   default is "main" — pass it explicitly if the repo uses e.g. master
-      # runtime add: no daemon restart needed, survives restarts (stored in
-      #   the dispatcher DB; config [[projects]] is only synced in, never out)
-      ladd project list                            # confirm; new projects
-                                                   # start in 'single' mode
-      # worktrees for its jobs live under ~/.local/share/local-dispatcher/
-      # worktrees/ — NOT inside the project folder
+      # --integration-ref = branch you merge dispatch/* into (default "main";
+      #   pass it explicitly if the repo uses e.g. master)
+      # runtime add: no daemon restart needed, survives restarts
 
-   Then the same loop as steps 2-5, aimed at the new project:
+   THEN JUST FIRE CLAUDE CODE IN THAT FOLDER — nothing else to install:
+      cd /dd2/andrei/docker/vast && claude
+   The dispatch_* MCP tools are registered user-wide (all your projects)
+   and bind to vast automatically from the session's cwd. No ladd commands
+   inside the session, no project_id needed.
+
+   The whole loop as tool calls inside that Claude Code session:
+      dispatch_set_mode(mode="team")               # new projects start single
+      dispatch_submit(objective="<independent task>", base_commit=<HEAD sha>,
+                      profile_id="cc-worker", allowed_scope=["<dir1>"],
+                      acceptance_criteria=["<what 'done' means>"])
+      dispatch_job(job_id)                         # watch; include_result=true
+                                                   # for the full result
+      git fetch + merge dispatch/j_XXXX            # review, then merge in repo
+      dispatch_integrate(job_id, commit=<new HEAD sha>)
+      dispatch_set_mode(mode="single", policy="drain")
+
+   Same loop from a terminal instead (equivalent ladd commands — only if
+   you are NOT working inside a Claude Code session):
       ladd mode vast team
       BASE=$(git -C /dd2/andrei/docker/vast rev-parse HEAD)
       ladd submit "<independent task>" $BASE cc-worker \
-          --scope <dir1> --scope <dir2> \
-          --criterion "<what 'done' means>" \
-          --project vast
+          --scope <dir1> --criterion "<what 'done' means>" --project vast
       # --scope paths are relative to the repo root
       ladd job j_XXXX --full                       # watch
       git -C /dd2/andrei/docker/vast fetch
@@ -78,11 +90,8 @@ tr4-secondary :8080 is reserved for the interactive Cline session.
       ladd integrate j_XXXX --commit $NEWSHA
       ladd mode vast single --policy drain
 
-   From a Claude Code session sitting IN /dd2/andrei/docker/vast, the
-   dispatch_* MCP tools bind to it automatically (the session's cwd is
-   longest-prefix-matched against registered projects) — no project_id
-   needed. From the terminal, name it explicitly: `ladd mode <id> ...`
-   (positional) and `ladd submit ... --project <id>`.
+   # worktrees for its jobs live under ~/.local/share/local-dispatcher/
+   # worktrees/ — NOT inside the project folder
 
 TROUBLESHOOTING (one-liners)
    ladd backend check i7                           # force one probe + show its row
