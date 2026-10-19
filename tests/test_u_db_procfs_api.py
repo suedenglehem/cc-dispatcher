@@ -33,9 +33,17 @@ def test_migrations_idempotent(tmp_path):
     v2 = d.migrate()
     assert v1 == v2
     # version tracks the numbered migration files, so adding 0003_*.sql
-    # updates the schema without this test changing
-    n = len(list((Path(__file__).resolve().parent.parent
-                  / "local_dispatcher" / "migrations").glob("*.sql")))
+    # updates the schema without this test changing. Validate the numbering
+    # itself: duplicate/empty prefixes would make the count lie or apply
+    # two migrations under one version.
+    files = sorted((Path(__file__).resolve().parent.parent
+                    / "local_dispatcher" / "migrations").glob("*.sql"))
+    prefixes = [f.name.split("_", 1)[0] for f in files]
+    assert prefixes == [f"{i:04d}" for i in range(1, len(files) + 1)]
+    for f in files:
+        assert f.name.split("_", 1)[1].endswith(".sql")
+        assert f.name.split("_", 1)[1][:-4], f"empty migration name: {f.name}"
+    n = len(files)
     assert v1 == n
     tables = {r["name"] for r in d.query(
         "SELECT name FROM sqlite_master WHERE type='table'")}

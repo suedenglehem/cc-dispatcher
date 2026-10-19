@@ -9,6 +9,7 @@ model maximum, overridable per backend.
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -138,6 +139,32 @@ class BackendConfig:
     salad_proxy_port: int = 0
     salad_thinking: bool = False
     salad_heartbeat: bool = True
+
+
+def normalize_gateway(url: str) -> str:
+    """Normalise a gateway URL to scheme://host[:port] (path dropped).
+
+    Bare host or full URL both work. For public salad.cloud hosts the scheme
+    is always https (the Cloudflare front only proxies standard ports). An
+    explicit http:// to a loopback host is preserved as-is — that is the
+    local test-gateway path (the vendored proxy speaks TLS upstream, which
+    real salad.cloud groups require). Any other scheme is rejected rather
+    than silently mangled.
+    """
+    u = url.strip()
+    m = re.match(r"^([A-Za-z][A-Za-z0-9+.-]*)://", u)
+    scheme = None
+    if m:
+        scheme = m.group(1).lower()
+        if scheme not in ("http", "https"):
+            raise ValueError(f"unsupported salad gateway scheme {scheme!r}: {url!r}")
+        u = u[m.end():]
+    u = u.split("/", 1)[0].strip()
+    if not u or " " in u:
+        raise ValueError(f"invalid salad gateway URL: {url!r}")
+    if scheme == "http" and u.split(":", 1)[0] in ("127.0.0.1", "localhost"):
+        return f"http://{u}"
+    return f"https://{u}"
 
 
 def worker_endpoint(b: BackendConfig) -> str:
@@ -274,7 +301,9 @@ def load_config(path: str | Path | None = None) -> Config:
                              "'endpoint'; drop the empty [[backends]] table "
                              "when it has no fields")
         return BackendConfig(
-            id=b["id"], endpoint=b["endpoint"],
+            id=b["id"], endpoint=(
+                normalize_gateway(b["endpoint"])
+                if b.get("kind", "local") == "salad" else b["endpoint"]),
             openai_base_url=b.get("openai_base_url", ""),
             model_id=b.get("model_id", ""), model_label=b.get("model_label", ""),
             credential_env=b.get("credential_env", {}) or {},
@@ -340,6 +369,7 @@ def load_config(path: str | Path | None = None) -> Config:
 def _validate(cfg: Config) -> None:
     group_ids = {g.id for g in cfg.groups}
     backend_ids = {b.id for b in cfg.backends}
+    salad_ports: dict[int, str] = {}
     for b in cfg.backends:
         if b.resource_group and b.resource_group not in group_ids:
             raise ValueError(f"backend {b.id}: unknown resource_group {b.resource_group!r}")
@@ -355,12 +385,29 @@ def _validate(cfg: Config) -> None:
                                  f"`ladd backend add-salad` assigns one)")
             if b.is_primary:
                 raise ValueError(f"salad backend {b.id}: cannot be primary")
+            other = salad_ports.get(b.salad_proxy_port)
+            if other is not None:
+                raise ValueError(
+                    f"salad_proxy_port {b.salad_proxy_port} is used by both "
+                    f"{other!r} and {b.id!r}; each salad backend needs its "
+                    "own port")
+            salad_ports[b.salad_proxy_port] = b.id
+    by_id = {b.id: b for b in cfg.backends}
     for p in cfg.profiles:
         if p.adapter not in ("claude", "cline"):
             raise ValueError(f"profile {p.id}: unknown adapter {p.adapter!r}")
         unknown = set(p.backend_ids) - backend_ids
         if unknown:
             raise ValueError(f"profile {p.id}: unknown backend_ids {sorted(unknown)}")
+        if p.adapter != "claude":
+            # cline speaks OpenAI chat completions; the salad proxy speaks
+            # Anthropic Messages only, so such a launch would 403 keyless.
+            bad = [bid for bid in p.backend_ids if by_id[bid].kind == "salad"]
+            if bad:
+                raise ValueError(
+                    f"profile {p.id!r} (adapter {p.adapter!r}) cannot use "
+                    f"salad backend(s) {bad}: only the claude adapter can "
+                    "speak through the local salad proxy")
     proj_ids = {p.id for p in cfg.projects}
     if len(proj_ids) != len(cfg.projects):
         raise ValueError("duplicate project ids in config")

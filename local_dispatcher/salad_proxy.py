@@ -353,13 +353,19 @@ class EmptyThinkStripper:
         buf = self.buf
         while buf:
             if self.after_block:
-                self.after_block = False
+                # Consume the newline run that followed the stripped block.
+                # Stay in after_block across chunk boundaries: the next chunk
+                # may still start with the rest of that run, and clearing the
+                # flag early leaks a newline into the answer (chunk-dependent).
                 j = 0
                 while j < len(buf) and buf[j] == "\n":
                     j += 1
                 buf = buf[j:]
                 if not buf:
+                    if final:
+                        self.after_block = False
                     break
+                self.after_block = False
                 continue
             if not self.in_tag:
                 i = buf.find("<")
@@ -401,6 +407,10 @@ class EmptyThinkStripper:
 # --------------------------------------------------------------------------- #
 # OpenAI -> Anthropic (non-streaming response)
 # --------------------------------------------------------------------------- #
+_STOP_REASONS = {"stop": "end_turn", "tool_calls": "tool_use",
+                 "length": "max_tokens", "content_filter": "end_turn"}
+
+
 def openai_to_anthropic(resp, model):
     choices = resp.get("choices") or [{}]
     ch = choices[0]
@@ -424,8 +434,7 @@ def openai_to_anthropic(resp, model):
     if not content:
         content = [{"type": "text", "text": ""}]
     fr = ch.get("finish_reason")
-    stop = {"stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens",
-            "content_filter": "end_turn"}.get(fr, "end_turn")
+    stop = _STOP_REASONS.get(fr, "end_turn")
     usage = resp.get("usage") or {}
     return {
         "id": "msg_" + (resp.get("id") or _rand_id()),
@@ -455,21 +464,22 @@ def _iter_sse(resp):
         if not line:
             continue  # SSE event separator
         if not line.startswith("data:"):
-            # SSE comments/keepalives (": ...") and 'event:' lines are fine;
-            # anything else is not SSE at all — flag it, don't skip it.
-            if not line.startswith(":") and not line.startswith("event:"):
+            # Standard SSE fields are fine: comments/keepalives (": ..."),
+            # event:, id:, retry:. Anything else is not SSE at all.
+            if not line.startswith((":", "event:", "id:", "retry:")):
                 yield {"__proxy_anomaly__": "non-SSE line from upstream: %r"
                        % line[:200]}
             continue
         data = line[len("data:"):].strip()
         if data == "[DONE]":
+            yield {"__proxy_done__": True}
             return
         try:
             obj = json.loads(data)
         except Exception:
             yield {"__proxy_anomaly__": "unparseable 'data:' line: %r" % data[:200]}
             continue
-        if isinstance(obj, dict) and "error" in obj:
+        if isinstance(obj, dict) and obj.get("error"):
             yield {"__proxy_anomaly__": "upstream error payload: %s"
                    % json.dumps(obj.get("error"), default=str)[:400]}
             return  # error payloads are terminal
@@ -488,7 +498,9 @@ class StreamBuilder:
         self.tools = {}
         self.finish_reason = None
         self.usage_out = 0
+        self.usage_in = 0
         self.saw_content = False
+        self.saw_done = False
         self.anomalies = []
         self.strip = EmptyThinkStripper()  # see the stripper section above
 
@@ -508,8 +520,12 @@ class StreamBuilder:
         if "__proxy_anomaly__" in chunk:
             self.anomalies.append(chunk["__proxy_anomaly__"])
             return out
+        if chunk.get("__proxy_done__"):
+            self.saw_done = True
+            return out
         if isinstance(chunk.get("usage"), dict):
             self.usage_out = chunk["usage"].get("completion_tokens") or self.usage_out
+            self.usage_in = chunk["usage"].get("prompt_tokens") or self.usage_in
         choices = chunk.get("choices") or []
         if not choices:
             return out
@@ -536,6 +552,12 @@ class StreamBuilder:
         Callers should flush any stripper-buffered tail first and treat a
         non-empty tail as content too."""
         return not self.saw_content and not self.tools
+
+    def is_complete(self):
+        """True when upstream signalled a real end of turn: a finish_reason
+        on a chunk, or the SSE [DONE] marker. Without one, an anomaly means
+        the stream was cut mid-answer and the content may be partial."""
+        return self.saw_done or self.finish_reason is not None
 
     def _text_raw(self, t):
         out = []
@@ -600,11 +622,11 @@ class StreamBuilder:
                           "partial_json": t["args"] or "{}"}}))
             out.append(_ev("content_block_stop",
                            {"type": "content_block_stop", "index": t["aidx"]}))
-        stop = {"stop": "end_turn", "tool_calls": "tool_use", "length": "max_tokens",
-                "content_filter": "end_turn"}.get(self.finish_reason, "end_turn")
+        stop = _STOP_REASONS.get(self.finish_reason, "end_turn")
         out.append(_ev("message_delta", {"type": "message_delta",
             "delta": {"stop_reason": stop, "stop_sequence": None},
-            "usage": {"output_tokens": self.usage_out}}))
+            "usage": {"input_tokens": self.usage_in,
+                      "output_tokens": self.usage_out}}))
         out.append(_ev("message_stop", {"type": "message_stop"}))
         return out
 
@@ -631,12 +653,14 @@ class Handler(BaseHTTPRequestHandler):
     def _upstream(self):
         return self.server.upstream
 
-    def _write(self, s):
+    def _write(self, s) -> bool:
+        """Write one SSE frame. False means the client is gone."""
         try:
             self.wfile.write(s.encode("utf-8"))
             self.wfile.flush()
+            return True
         except Exception:
-            pass
+            return False
 
     # ---- GET ----
     def do_GET(self):
@@ -729,30 +753,51 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.close_connection = True
             b = StreamBuilder(up.model, _rand_id())
-            self._write(b.message_start())
+            if not self._write(b.message_start()):
+                resp.close()
+                return
+            disconnected = False
             try:
                 for chunk in _iter_sse(resp):
                     for frame in b.handle(chunk):
-                        self._write(frame)
+                        if not self._write(frame):
+                            disconnected = True
+                            break
+                    if disconnected:
+                        break
+                if disconnected:
+                    # The worker went away: stop consuming upstream instead
+                    # of holding the (serial) Salad group busy for the rest
+                    # of a long generation. finally closes the connection.
+                    return
                 tail = b.strip.flush()
-                if b.anomalies or (not tail and b.is_empty()):
+                has_content = bool(tail) or not b.is_empty()
+                # No usable content, or no real end signal (finish_reason /
+                # [DONE]): either way the turn may be empty or truncated, so
+                # fail loudly and let the dispatcher retry instead of
+                # recording a bogus answer. A complete answer followed by an
+                # odd line is still complete.
+                if not has_content or not b.is_complete():
                     # A stream that ended without content is never a valid
                     # turn for the agent loop (thinking is off; tool-only
                     # turns carry tool_calls). Surfaced causes seen live:
                     # the origin/edge killing the stream mid-flight, an
                     # in-band error payload, or a zero-token completion.
-                    # Emit one error event instead of a clean empty finish
-                    # so the CLI fails loudly and the dispatcher can
-                    # classify + retry rather than recording a bogus
-                    # invalid_result.
-                    detail = "; ".join(b.anomalies[:3]) or (
-                        "stream ended with no content "
-                        "(finish_reason=%s, output_tokens=%d)"
-                        % (b.finish_reason, b.usage_out))
+                    if b.anomalies:
+                        detail = "; ".join(b.anomalies[:3])
+                    elif not has_content:
+                        detail = ("stream ended with no content "
+                                  "(finish_reason=%s, output_tokens=%d)"
+                                  % (b.finish_reason, b.usage_out))
+                    else:
+                        detail = ("stream ended before a completion signal "
+                                  "(finish_reason=%s, output_tokens=%d)"
+                                  % (b.finish_reason, b.usage_out))
+                    what = ("upstream stream produced no content"
+                            if not has_content else "upstream stream truncated")
                     self._write(_ev("error", {"type": "error",
                                  "error": {"type": "api_error",
-                                           "message": "upstream stream "
-                                           "produced no content: %s" % detail}}))
+                                           "message": "%s: %s" % (what, detail)}}))
                 else:
                     for frame in b.finish(tail):
                         self._write(frame)
@@ -772,6 +817,20 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._json(502, {"type": "error", "error": {"type": "api_error",
                            "message": "upstream returned non-JSON"}})
+                conn.close()
+                return
+            # A 200 can still carry an error payload or no completion at all
+            # (edge/origin kill, zero-token body). Mirror the streaming path:
+            # never render that as a clean empty assistant turn.
+            if (not isinstance(obj, dict) or obj.get("error")
+                    or not obj.get("choices")):
+                if isinstance(obj, dict) and obj.get("error"):
+                    detail = json.dumps(obj.get("error"), default=str)[:400]
+                else:
+                    detail = "response has no 'choices'"
+                self._json(502, {"type": "error", "error": {
+                    "type": "api_error",
+                    "message": "upstream produced no content: %s" % detail}})
                 conn.close()
                 return
             self._json(200, openai_to_anthropic(obj, up.model))

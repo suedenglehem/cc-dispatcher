@@ -87,6 +87,7 @@ class Scheduler:
         self.pre_gate_hook = None
         self._stopping = False
         self._tick_task: asyncio.Task | None = None
+        self._heartbeat_task: asyncio.Task | None = None
         self._last_prune = 0.0
         from .adapters.claude import mycelium_mcp_json
         if not cfg.mycelium.enabled:
@@ -105,12 +106,13 @@ class Scheduler:
         """Stop the tick. Workers are intentionally left running: they carry
         the dispatcher marker env and are re-adopted on the next start."""
         self._stopping = True
-        if self._tick_task:
-            self._tick_task.cancel()
-            try:
-                await self._tick_task
-            except (asyncio.CancelledError, Exception):
-                pass
+        for task in (self._tick_task, self._heartbeat_task):
+            if task:
+                task.cancel()
+                try:
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
     async def _run(self) -> None:
         while not self._stopping:
@@ -127,12 +129,12 @@ class Scheduler:
     async def tick(self) -> None:
         await self._probe_due()
         # Keep IDLE_SHUTDOWN=heartbeat salad groups alive while a worker is
-        # actually running on them (mirrors the cl_salad keepalive).
-        if self.backends.salad is not None:
-            try:
-                await self.backends.salad.heartbeat_tick(self.db)
-            except Exception:
-                log.exception("salad heartbeat failed")
+        # actually running on them (mirrors the cl_salad keepalive). Detached:
+        # a slow/hung gateway must never delay reaping, deadlines, or launches.
+        if (self.backends.salad is not None
+                and (self._heartbeat_task is None or self._heartbeat_task.done())):
+            self._heartbeat_task = asyncio.create_task(
+                self._heartbeat_guarded(), name="salad-heartbeat")
         await self._reap()
         await self._context_watch()
         await self._deadline_check()
@@ -144,6 +146,14 @@ class Scheduler:
             except Exception:
                 log.exception("event prune failed")
             self._last_prune = now
+
+    async def _heartbeat_guarded(self) -> None:
+        try:
+            await self.backends.salad.heartbeat_tick(self.db)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("salad heartbeat failed")
 
     # -- probes ------------------------------------------------------------------
     async def _probe_due(self) -> None:
@@ -317,7 +327,7 @@ class Scheduler:
                     return "not_team"
                 allowed_ids = list(profile.backend_ids or [])
                 backend_id = self.backends.pick_backend(
-                    allowed_ids, job.get("backend_id"))
+                    allowed_ids, job.get("backend_id"), adapter=profile.adapter)
                 if backend_id is None:
                     detail = self._no_backend_detail(
                         allowed_ids, job.get("backend_id"))

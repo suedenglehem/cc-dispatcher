@@ -375,17 +375,21 @@ class ApiServer:
             "SELECT * FROM backends WHERE id=?", (params.backend_id,)))}
 
     # -- salad backends (runtime config edits) ----------------------------------
-    def _commit_config(self, text: str) -> None:
+    def _commit_config(self, text: str):
         """Write config.toml atomically: tmp file, full re-validation, then
-        os.replace. On validation failure nothing is changed."""
-        path = self.config_path
+        os.replace. On validation failure nothing is changed. Returns the
+        validated Config so callers need not re-read the file."""
+        # realpath: write through a symlinked config (dotfiles/stow) instead
+        # of replacing the link itself; also makes dirname absolute.
+        path = os.path.realpath(self.config_path)
         d = os.path.dirname(path)
-        os.makedirs(d, exist_ok=True)
+        if d:                      # dirname("config.toml") == "" — keep cwd
+            os.makedirs(d, exist_ok=True)
         fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".toml", dir=d)
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(text)
-            load_config(tmp)      # raise BEFORE touching the live file
+            new = load_config(tmp)      # raise BEFORE touching the live file
         except Exception as e:
             os.unlink(tmp)
             raise ApiError(ErrorCodes.SALAD_CONFIG_INVALID,
@@ -397,12 +401,25 @@ class ApiServer:
             mode = 0o600
         os.chmod(tmp, mode)
         os.replace(tmp, path)
+        return new
 
-    def _reload_config(self) -> None:
-        """Re-read config from disk and splice the live lists in place:
+    def _reload_config(self, new=None) -> None:
+        """Splice a freshly loaded config into the live lists in place:
         every component (scheduler, supervisor, api, salad manager) shares
-        this one Config instance."""
-        new = load_config(self.config_path)
+        this one Config instance.
+
+        Runtime `ladd backend set` overrides (enabled/manually_reserved/
+        reserved_note) live in the old objects and in the DB; carry them
+        over so an unrelated salad add/remove cannot silently undo them."""
+        if new is None:
+            new = load_config(self.config_path)
+        old = {b.id: b for b in self.cfg.backends}
+        for b in new.backends:
+            prev = old.get(b.id)
+            if prev is not None:
+                b.enabled = prev.enabled
+                b.manually_reserved = prev.manually_reserved
+                b.reserved_note = prev.reserved_note
         self.cfg.backends[:] = new.backends
         self.cfg.groups[:] = new.groups
         self.cfg.profiles[:] = new.profiles
@@ -439,6 +456,9 @@ class ApiServer:
                                    f"port {port} is already used by salad "
                                    f"backend {other.id!r}")
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # The proxy's server sets allow_reuse_address; without this a
+            # TIME_WAIT socket from a just-removed proxy looks occupied.
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind(("127.0.0.1", port))
             except OSError:
@@ -472,16 +492,17 @@ class ApiServer:
             text = Path(self.config_path).read_text(encoding="utf-8")
         new_text = append_to_profile_backend_lists(
             append_salad_backend(text, b), sid, adapters={"claude"})
-        self._commit_config(new_text)
-        self._reload_config()
-        self.backends.sync()
+        new_cfg = self._commit_config(new_text)
+        self._reload_config(new_cfg)
+        self.backends.sync(preserve_runtime=True)
         # Bringing the proxy up is best-effort here: a group the user hasn't
         # started yet is a normal offline state, not an error. Every probe
         # re-calls ensure(), so the proxy self-heals when the group comes up.
         up, detail = (await self.salad.ensure(self.cfg.backend(sid))
                       if self.salad is not None
                       else (False, "daemon has no salad proxy manager"))
-        res = await self.backends.probe(sid, force=True)
+        res = await self.backends.probe(
+            sid, force=True, ensure_result=(up, detail))
         self.db.event("backend", sid, "salad_backend_added",
                       {"endpoint": gw, "proxy_port": port,
                        "model": params.model, "proxy_up": up,
@@ -515,7 +536,9 @@ class ApiServer:
                            "quarantined worker reservation(s); cancel its "
                            "jobs first (ladd job cancel), then remove again")
         if self.salad is not None:
-            self.salad.stop(b.id)
+            # stop() waits (up to ~15s) for a wedged proxy; run it off the
+            # event loop so scheduler ticks and other API calls keep running.
+            await asyncio.to_thread(self.salad.stop, b.id)
         text = ""
         if os.path.exists(self.config_path):
             text = Path(self.config_path).read_text(encoding="utf-8")
@@ -523,9 +546,10 @@ class ApiServer:
             new_text = remove_salad_backend(text, b.id)
         except ValueError as e:
             raise ApiError(ErrorCodes.SALAD_REMOVE_FAILED, str(e))
-        self._commit_config(new_text)
-        self._reload_config()
-        self.backends.sync()   # tombstones the row: history stays resolvable
+        new_cfg = self._commit_config(new_text)
+        self._reload_config(new_cfg)
+        # tombstones the row: history stays resolvable
+        self.backends.sync(preserve_runtime=True, allow_empty=True)
         self.db.event("backend", b.id, "salad_backend_removed",
                       {"endpoint": b.endpoint})
         row = self.db.query_one("SELECT * FROM backends WHERE id=?", (b.id,))

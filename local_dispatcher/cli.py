@@ -212,17 +212,36 @@ def c_salad_shorthand(args) -> int:
                 print(f"  proxy not up: {r.get('proxy_detail')}")
         return 0
     rows = c.backend_list()["backends"]
+    # History tombstones stay in the DB; resolving against them can pick a
+    # removed row over the live one (and the daemon then says not-found).
+    live = [b for b in rows
+            if "tombstone" not in (b.get("reserved_note") or "")]
     try:
-        row = find_salad_backend(rows, args.delete_salad)
+        row = find_salad_backend(live, args.delete_salad)
     except ValueError as e:
         raise ApiError(ErrorCodes.SALAD_URL_INVALID, str(e))
     if row is None:
-        known = [b["id"] for b in rows if b.get("kind") == "salad"]
+        try:
+            tomb = find_salad_backend(rows, args.delete_salad)
+        except ValueError:
+            tomb = None
+        if tomb is not None:
+            print(f"salad backend {tomb['id']} is already removed")
+            return 0
+        known = [b["id"] for b in live if b.get("kind") == "salad"]
         raise ApiError(ErrorCodes.SALAD_NOT_FOUND,
                        f"no registered salad backend matches "
                        f"{args.delete_salad!r}",
                        salad_backends=known)
-    c.backend_remove_salad(row["id"])
+    try:
+        c.backend_remove_salad(row["id"])
+    except ApiError as e:
+        if e.code == ErrorCodes.SALAD_NOT_FOUND:
+            # The DB keeps removed backends as history tombstones, so the
+            # URL matches here while the daemon's live config does not.
+            print(f"salad backend {row['id']} is already removed")
+            return 0
+        raise
     if args.json:
         _out(args, {"removed": row["id"], "endpoint": row.get("endpoint")})
     else:
@@ -409,6 +428,9 @@ def main(argv: list[str] | None = None) -> int:
     args, extras = parser.parse_known_args(argv)
     try:
         if args.add_salad or args.delete_salad:
+            if args.cmd is not None:
+                parser.error("-a/--add-salad and -d/--delete-salad cannot be "
+                             "combined with a subcommand")
             if extras:
                 parser.error(f"unexpected extra arguments: {extras}")
             return c_salad_shorthand(args)

@@ -49,7 +49,9 @@ echo "    installed $UNIT_DST"
 echo "    (survive logout:  loginctl enable-linger \$USER  — one-time)"
 
 echo "==> [4/4] status"
-systemctl --user status local-dispatcher --no-pager 2>/dev/null | head -5 || \
+# sed, not head: sed drains its input, so a running systemctl cannot die of
+# SIGPIPE and trip pipefail into the "not started" branch below.
+systemctl --user status local-dispatcher --no-pager 2>/dev/null | sed -n '1,5p' || \
     echo "    daemon not started yet:  systemctl --user start local-dispatcher"
 
 cat <<'EOF'

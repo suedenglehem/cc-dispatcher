@@ -306,8 +306,26 @@ keeps the proxy alive, probes with the key, and schedules on it when online.
    30K-token prompts) ~13.5 min end-to-end. Expect the same order for real tasks:
    a salad group is a latency-limited backend (one instance serializes; the
    Cloudflare edge can 524 a stalled origin), not a throughput backend.
+10. **on_salad port + test instructions (2026-10-19, spillover).** The user's
+    sibling project `/dd2/andrei/docker/on_salad` runs the same Anthropic→OpenAI
+    bridge (`claude/sl_proxy.py` — the original this repo's `salad_proxy.py` was
+    vendored from) and had the **identical** pre-fix zero-content bug, affecting
+    interactive `cl_salad`/`sl_chat.sh` sessions. Ported the same 4-part fix
+    verbatim (`_iter_sse` anomaly sentinels; `StreamBuilder` `saw_content` /
+    `anomalies` / `is_empty`; pre-flushed `finish(tail)`; the streaming-path
+    `anomalies or (not tail and is_empty())` → one `error` event). Then left test
+    instructions in that project: `claude/TESTS.md` (offline suite + 3 live steps)
+    and a deterministic offline regression suite `tools/test_sl_proxy_offline.py`
+    (**10/10**, no group/TLS/money) in the project's `tools/test_*_offline.py`
+    convention. on_salad commits `f500326` (fix + README note) and `5aa1b51`
+    (test instructions + offline suite + README row), both pushed; the user's own
+    `PROGRESS.md` left untouched. The user runs the **live** steps tomorrow (group
+    up): `sl_curl.sh` baseline → `cl_salad -p "…pong…"` (proves no over-trigger) →
+    the edge-kill failure now surfaces as an error instead of an empty answer.
 
-Next unfinished task: none — P5 closed. Optional: push to origin.
+Next unfinished task: none in the dispatcher (P5 closed). on_salad: the user runs
+the live `claude/TESTS.md` steps tomorrow (salad group up); the offline suite
+already passes 10/10.
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")

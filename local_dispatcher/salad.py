@@ -34,7 +34,7 @@ import sys
 import time
 from pathlib import Path
 
-from .config import BackendConfig
+from .config import BackendConfig, normalize_gateway
 
 log = logging.getLogger("dispatcherd.salad")
 
@@ -53,28 +53,6 @@ def read_salad_key(keyfile: str) -> str:
         return ""
 
 
-def normalize_gateway(url: str) -> str:
-    """Normalise a gateway URL to scheme://host[:port] (path dropped).
-
-    Mirrors cl_salad: bare host or full URL both work. For public
-    salad.cloud hosts the scheme is always https (the Cloudflare front
-    only proxies standard ports). An explicit http:// to a loopback host
-    is preserved as-is — that is the local test-gateway path (the vendored
-    proxy speaks TLS upstream, which real salad.cloud groups require).
-    """
-    u = url.strip()
-    m = re.match(r"^(https?)://", u)
-    scheme = m.group(1) if m else None
-    u = re.sub(r"^https?://", "", u)
-    u = u.split("/", 1)[0]
-    u = u.strip()
-    if not u or " " in u:
-        raise ValueError(f"invalid salad gateway URL: {url!r}")
-    if scheme == "http" and u.split(":", 1)[0] in ("127.0.0.1", "localhost"):
-        return f"http://{u}"
-    return f"https://{u}"
-
-
 def find_salad_backend(rows: list[dict], url: str) -> dict | None:
     """The salad-kind row whose normalized endpoint equals
     normalize_gateway(url) — the `ladd -d URL` → backend id resolution.
@@ -88,10 +66,22 @@ def proxy_nonce(b: BackendConfig) -> str:
     """Stable per-backend identity for the proxy's /healthz echo.
 
     Stable across daemon restarts (so an orphaned proxy from a crashed
-    generation is adopted, not duplicated) but changes when the gateway URL
-    changes (so a stale proxy for an old group is never adopted).
+    generation is adopted, not duplicated) but changes when ANYTHING the
+    proxy was spawned with changes — gateway URL, model, thinking, token
+    cap, or the key itself — so a stale proxy is never adopted after a
+    config edit or key rotation. Hashing the key locally is safe: only 8
+    hex chars of a SHA-256 digest are used and they are never logged.
     """
-    digest = hashlib.md5(b.endpoint.encode("utf-8")).hexdigest()[:8]
+    keyfile = b.salad_keyfile or SALAD_KEYFILE_DEFAULT
+    try:
+        key_digest = hashlib.sha256(
+            Path(keyfile).read_bytes().strip()).hexdigest()[:8]
+    except OSError:
+        key_digest = "nokey"
+    ident = "|".join((
+        b.endpoint, b.model_id or "", b.model_label or "",
+        "1" if b.salad_thinking else "0", str(b.salad_proxy_port), key_digest))
+    digest = hashlib.md5(ident.encode("utf-8")).hexdigest()[:8]
     return f"dispatcherd-{b.id}-{b.salad_proxy_port}-{digest}"
 
 
@@ -107,6 +97,9 @@ class SaladProxyManager:
         self.paths = paths
         self._procs: dict[str, subprocess.Popen] = {}
         self._last_beat: dict[str, float] = {}
+        # One lock per backend: add-salad and the scheduler probe can call
+        # ensure() concurrently; without this both see "not up" and spawn.
+        self._locks: dict[str, asyncio.Lock] = {}
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -155,9 +148,15 @@ class SaladProxyManager:
 
         Returns (up, detail). detail explains WHY it is down — it is surfaced
         in the probe result so `ladd workers` / status are actionable.
+        Serialized per backend: concurrent callers never spawn duplicates.
         """
         if b.kind != "salad":
             return True, ""
+        lock = self._locks.setdefault(b.id, asyncio.Lock())
+        async with lock:
+            return await self._ensure_locked(b)
+
+    async def _ensure_locked(self, b: BackendConfig) -> tuple[bool, str]:
         keyfile = b.salad_keyfile or SALAD_KEYFILE_DEFAULT
         if not read_salad_key(keyfile):
             return False, f"cannot read Salad key from {keyfile}"
@@ -170,43 +169,113 @@ class SaladProxyManager:
             if proc is not None and proc.poll() is None:
                 return True, ""            # ours, alive
             # orphaned by a previous daemon generation (crash / kill -9):
-            # same port + same upstream hash in the nonce => still valid,
-            # adopt instead of duplicating. We cannot kill it at clean stop
-            # (pid unknown), which is fine: it holds no state.
+            # same identity in the nonce => still valid, adopt instead of
+            # duplicating. stop() can find it again by nonce when needed.
             log.info("salad backend %s: adopting orphaned proxy on 127.0.0.1:%d",
                      b.id, port)
             return True, ""
 
-        # Not ours. If we had a tracked proc it died — reap the record.
-        dead = self._procs.pop(b.id, None)
-        if dead is not None and dead.poll() is not None:
-            log.warning("salad backend %s: proxy exited (rc=%s); restarting",
-                        b.id, dead.returncode)
-        elif current is not None:
-            return False, (f"127.0.0.1:{port} is held by another process; "
-                           f"free the port or set a different salad_proxy_port")
+        # Nothing of ours is answering. A tracked process may still be alive
+        # but hung (it owns the port and would block a second bind): kill it.
+        tracked = self._procs.pop(b.id, None)
+        if tracked is not None:
+            if tracked.poll() is None:
+                log.warning("salad backend %s: proxy unresponsive; killing it",
+                            b.id)
+                await asyncio.to_thread(self._terminate, tracked, b.id)
+                current = await self._healthz_nonce(port)
+            else:
+                log.warning("salad backend %s: proxy exited (rc=%s); restarting",
+                            b.id, tracked.returncode)
 
-        self._spawn(b, keyfile)
+        if current is not None:
+            if current.startswith(f"dispatcherd-{b.id}-"):
+                # OUR proxy, but spawned with an older identity (model,
+                # thinking, cap, or key changed). Replace it; adopting it
+                # would keep using stale flags/credentials.
+                log.info("salad backend %s: replacing stale proxy (identity "
+                         "changed)", b.id)
+                await asyncio.to_thread(self._kill_by_nonce, current)
+                for _ in range(25):
+                    current = await self._healthz_nonce(port)
+                    if current is None:
+                        break
+                    await asyncio.sleep(0.2)
+            if current is not None:
+                return False, (f"127.0.0.1:{port} is held by another process; "
+                               f"free the port or set a different salad_proxy_port")
+
+        try:
+            self._spawn(b, keyfile)
+        except (ValueError, OSError) as e:
+            return False, f"cannot start salad proxy: {e}"
         for _ in range(25):
             if await self._healthz_nonce(port) == nonce:
                 return True, ""
             await asyncio.sleep(0.4)
-        proc = self._procs.pop(b.id, None)
+        proc = self._procs.get(b.id)
         if proc is not None and proc.poll() is not None:
-            return False, (f"proxy exited on startup (rc={proc.returncode}); "
+            rc = proc.returncode
+            self._procs.pop(b.id, None)
+            return False, (f"proxy exited on startup (rc={rc}); "
                            f"log: {self._log_path(b)}")
         if proc is not None:
-            self.stop(b.id)   # spawned but never identified as ours
-            self._procs.pop(b.id, None)
+            await asyncio.to_thread(self.stop, b.id)   # kill + drop the record
         return False, f"proxy did not come up on 127.0.0.1:{port} " \
                       f"(log: {self._log_path(b)})"
 
-    def stop(self, backend_id: str) -> None:
-        """Terminate the proxy for this backend (TERM group, then KILL)."""
-        self._last_beat.pop(backend_id, None)
-        proc = self._procs.pop(backend_id, None)
-        if proc is None:
+    @staticmethod
+    def _find_proxy_pids(pattern: str) -> list[int]:
+        """PIDs whose argv contains a nonce starting with `pattern` and runs
+        salad_proxy.py.
+
+        A full nonce is unique per backend identity; the id+port prefix also
+        matches an OLD nonce left behind by a key/model change. Either way
+        only our proxy matches, so nothing else is touched. Same-user /proc
+        only; failures are ignored.
+        """
+        pids = []
+        try:
+            entries = os.listdir("/proc")
+        except OSError:
+            return pids
+        for name in entries:
+            if not name.isdigit():
+                continue
+            try:
+                with open(f"/proc/{name}/cmdline", "rb") as f:
+                    argv = [p.decode("utf-8", "surrogateescape")
+                            for p in f.read().split(b"\0") if p]
+            except OSError:
+                continue
+            if (any(a.startswith(pattern) for a in argv)
+                    and any(a.endswith("salad_proxy.py") for a in argv)):
+                pids.append(int(name))
+        return pids
+
+    def _kill_by_nonce(self, nonce: str) -> None:
+        for pid in self._find_proxy_pids(nonce):
+            self._terminate_pid(pid)
+
+    @staticmethod
+    def _terminate_pid(pid: int) -> None:
+        try:
+            pgid = os.getpgid(pid)
+            os.killpg(pgid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
             return
+        for _ in range(50):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return
+            time.sleep(0.2)
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
+
+    def _terminate(self, proc: subprocess.Popen, backend_id: str) -> None:
         if proc.poll() is not None:
             return
         try:
@@ -225,10 +294,30 @@ class SaladProxyManager:
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            log.warning("salad proxy for %s did not exit after SIGKILL", backend_id)
+            log.warning("salad proxy for %s did not exit after SIGKILL",
+                        backend_id)
+
+    def stop(self, backend_id: str) -> None:
+        """Terminate the proxy for this backend (TERM group, then KILL).
+
+        Also reaps an orphan adopted from a previous daemon generation: the
+        Popen handle is gone, but the process still carries our nonce in its
+        argv, so it is found and killed by that.
+        """
+        self._last_beat.pop(backend_id, None)
+        proc = self._procs.pop(backend_id, None)
+        if proc is not None:
+            self._terminate(proc, backend_id)
+        b = self.cfg.backend(backend_id)
+        if b is not None and b.kind == "salad":
+            # id+port prefix: also finds an orphan spawned with an OLD nonce
+            # (e.g. before a key rotation), which the current nonce misses.
+            self._kill_by_nonce(f"dispatcherd-{b.id}-{b.salad_proxy_port}-")
 
     def stop_all(self) -> None:
-        for bid in list(self._procs):
+        ids = {b.id for b in self.cfg.backends if b.kind == "salad"}
+        ids.update(self._procs)
+        for bid in ids:
             self.stop(bid)
 
     # -- keepalive ------------------------------------------------------------
@@ -250,13 +339,15 @@ class SaladProxyManager:
                 "AND kind='backend' AND status='active'", (b.id,))
             if not row or row["c"] == 0:
                 continue
-            if now - self._last_beat.get(b.id, 0.0) < HEARTBEAT_INTERVAL_S:
+            last = self._last_beat.get(b.id)
+            # None = never beaten: fire immediately, even on a host whose
+            # monotonic clock is younger than the interval.
+            if last is not None and now - last < HEARTBEAT_INTERVAL_S:
                 continue
             keyfile = b.salad_keyfile or SALAD_KEYFILE_DEFAULT
             key = read_salad_key(keyfile)
             if not key:
                 continue
-            self._last_beat[b.id] = now
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     await client.post(
@@ -268,6 +359,11 @@ class SaladProxyManager:
             except Exception as e:  # noqa: BLE001 — keepalive must not raise
                 log.debug("salad heartbeat for %s failed: %s", b.id,
                           type(e).__name__)
+            finally:
+                # Stamp AFTER the attempt: the next beat is one interval
+                # after this one finished, not after it started (a timeout
+                # would otherwise stretch the gap past the idle window).
+                self._last_beat[b.id] = time.monotonic()
 
 
 # --------------------------------------------------------------------------- #
@@ -276,10 +372,6 @@ class SaladProxyManager:
 
 def _toml_str(s: str) -> str:
     return json.dumps(s)  # JSON basic strings are valid TOML basic strings
-
-
-def _toml_bool(v: bool) -> str:
-    return "true" if v else "false"
 
 
 def salad_block_text(b: BackendConfig) -> str:
@@ -320,7 +412,7 @@ def append_salad_backend(text: str, b: BackendConfig) -> str:
     return text + salad_block_text(b) + "\n"
 
 
-_TABLE_HDR = re.compile(r"^\[\S")              # [table] / [[array-of-tables]]
+_TABLE_HDR = re.compile(r"^\s*\[\s*\[?\s*[A-Za-z0-9_\"'-]")  # TOML allows indentation
 
 
 def _tables(lines: list[str]) -> list[list]:
@@ -365,6 +457,49 @@ def remove_salad_backend(text: str, backend_id: str) -> str:
     return out
 
 
+def _array_span(lines: list[str], start: int, end: int, key: str):
+    """Locate `key = [ ... ]` within [start, end).
+
+    Returns (first_line, last_line, indent, items, comment) or None. Handles
+    multi-line arrays and a trailing comment after the closing bracket —
+    both valid TOML that a single-line regex silently missed.
+    """
+    pat = re.compile(r"^(\s*)" + re.escape(key) + r"\s*=\s*\[")
+    for i in range(start, end):
+        m = pat.match(lines[i])
+        if not m:
+            continue
+        indent = m.group(1)
+        # Build a comment-free copy to find the closing bracket and parse
+        # items; TOML allows `# ...` comments inside a multi-line array.
+        code = lines[i][m.end():].split("#", 1)[0]
+        last = i
+        while "]" not in code and last + 1 < end:
+            last += 1
+            code += "\n" + lines[last].split("#", 1)[0]
+        if "]" not in code:
+            return None                     # malformed: leave the file alone
+        inner, _, _tail = code.partition("]")
+        comment = ""
+        cm = re.search(r"#.*$", lines[last])
+        if cm:
+            comment = "  " + cm.group(0).strip()
+        items = []
+        for piece in inner.replace("\n", " ").split(","):
+            piece = piece.strip()
+            if len(piece) >= 2 and piece[0] == piece[-1] and piece[0] in "\"'":
+                piece = piece[1:-1]
+            if piece:
+                items.append(piece)
+        return i, last, indent, items, comment
+    return None
+
+
+def _format_array(indent: str, items: list[str], comment: str) -> str:
+    return (f"{indent}backend_ids = "
+            f"[{', '.join(json.dumps(x) for x in items)}]{comment}")
+
+
 def append_to_profile_backend_lists(text: str, backend_id: str,
                                     adapters: set[str] | None = None) -> str:
     """Add backend_id to the backend_ids list of every [[profiles]] entry.
@@ -375,32 +510,25 @@ def append_to_profile_backend_lists(text: str, backend_id: str,
     table order keeps the computed spans valid across inserts.
     """
     lines = text.splitlines()
-    tables = _tables(lines)
-    q = f'"{backend_id}"'
-    q1 = f"'{backend_id}'"
-    for start, end, header in reversed(tables):
+    for start, end, header in reversed(_tables(lines)):
         if not header.startswith("[[profiles]]"):
             continue
         adapter = "claude"
-        bi = None
         for i in range(start, end):
             ma = re.match(r'^\s*adapter\s*=\s*["\']?([A-Za-z0-9_-]+)', lines[i])
             if ma:
                 adapter = ma.group(1)
-            if re.match(r"^\s*backend_ids\s*=\s*\[", lines[i]):
-                bi = i
         if adapters is not None and adapter not in adapters:
             continue
-        if bi is not None:
-            m = re.match(r"^(\s*backend_ids\s*=\s*\[)(.*)(\])\s*$", lines[bi])
-            inner = m.group(2)
-            if q in inner or q1 in inner:
-                continue
-            items = [x.strip() for x in inner.split(",") if x.strip()]
-            items.append(q)
-            lines[bi] = m.group(1) + ", ".join(items) + m.group(3)
-        else:
-            lines.insert(start + 1, f"backend_ids = [{q}]")
+        span = _array_span(lines, start, end, "backend_ids")
+        if span is None:
+            lines.insert(start + 1, f"backend_ids = [{json.dumps(backend_id)}]")
+            continue
+        first, last, indent, items, comment = span
+        if backend_id in items:
+            continue
+        items.append(backend_id)
+        lines[first:last + 1] = [_format_array(indent, items, comment)]
     out = "\n".join(lines)
     if not out.endswith("\n"):
         out += "\n"
@@ -408,23 +536,19 @@ def append_to_profile_backend_lists(text: str, backend_id: str,
 
 
 def _strip_from_profile_lists(lines: list[str], backend_id: str) -> list[str]:
-    tables = _tables(lines)
-    q = f'"{backend_id}"'
-    q1 = f"'{backend_id}'"
-    for start, end, header in tables:
+    # Reverse order: replacing a multi-line array with one line shifts all
+    # later line numbers, so edit bottom-up.
+    for start, end, header in reversed(_tables(lines)):
         if not header.startswith("[[profiles]]"):
             continue
-        for i in range(start, end):
-            m = re.match(r"^(\s*backend_ids\s*=\s*\[)(.*)(\])\s*$", lines[i])
-            if not m:
-                continue
-            inner = m.group(2)
-            if q in inner:
-                inner = inner.replace(q, "")
-            elif q1 in inner:
-                inner = inner.replace(q1, "")
-            items = [x.strip() for x in inner.split(",") if x.strip()]
-            lines[i] = m.group(1) + ", ".join(items) + m.group(3)
+        span = _array_span(lines, start, end, "backend_ids")
+        if span is None:
+            continue
+        first, last, indent, items, comment = span
+        if backend_id not in items:
+            continue
+        items = [x for x in items if x != backend_id]
+        lines[first:last + 1] = [_format_array(indent, items, comment)]
     return lines
 
 
@@ -437,6 +561,9 @@ def allocate_salad_port(cfg) -> int | None:
         if port in used:
             continue
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        # Tolerate TIME_WAIT left by a just-removed proxy (its server sets
+        # allow_reuse_address), otherwise a usable port looks occupied.
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
         except OSError:

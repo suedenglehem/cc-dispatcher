@@ -3,6 +3,9 @@ TOML backend/profile-list editing, and the -d URL→row resolution."""
 
 from __future__ import annotations
 
+import json
+import tomllib
+
 import pytest
 
 from local_dispatcher.config import (BackendConfig, Config, DaemonConfig,
@@ -13,6 +16,7 @@ from local_dispatcher.salad import (SALAD_PROXY_PORT_BASE,
                                     append_to_profile_backend_lists,
                                     find_salad_backend, normalize_gateway,
                                     proxy_nonce, remove_salad_backend)
+from local_dispatcher.salad_proxy import EmptyThinkStripper, StreamBuilder
 
 # -- URL normalization ----------------------------------------------------------
 
@@ -73,6 +77,9 @@ def test_port_allocation(monkeypatch):
     import local_dispatcher.salad as salad
 
     class _FakeSocket:
+        def setsockopt(self, _level, _opt, _val):
+            pass
+
         def bind(self, _addr):
             pass
 
@@ -82,6 +89,8 @@ def test_port_allocation(monkeypatch):
     class _FakeSocketModule:
         AF_INET = 2
         SOCK_STREAM = 1
+        SOL_SOCKET = 1
+        SO_REUSEADDR = 2
 
         @staticmethod
         def socket(_af, _type):
@@ -177,6 +186,147 @@ def test_find_salad_backend():
         find_salad_backend(rows, "bad url with spaces")
 
 
+# -- regression: scheme handling, proxy identity, multi-line TOML --------------------
+
+def test_normalize_gateway_scheme_handling():
+    assert normalize_gateway("HTTPS://G.salad.cloud") == "https://G.salad.cloud"
+    # non-http(s) schemes are rejected, not mangled into https://ftp:
+    for bad in ("ftp://g.salad.cloud", "file:///etc/passwd", "ssh://host"):
+        with pytest.raises(ValueError):
+            normalize_gateway(bad)
+
+
+def test_proxy_nonce_covers_spawn_identity(tmp_path):
+    key = tmp_path / "salad_key"
+    key.write_text("key-one", encoding="utf-8")
+
+    def mk(**kw):
+        args = dict(id="g1", endpoint="https://g1.salad.cloud",
+                    model_id="qwen", model_label="qwen",
+                    kind="salad", salad_proxy_port=18100,
+                    salad_keyfile=str(key))
+        args.update(kw)
+        return BackendConfig(**args)
+
+    base = proxy_nonce(mk())
+    assert base == proxy_nonce(mk())               # stable
+    assert base != proxy_nonce(mk(model_label="other"))
+    assert base != proxy_nonce(mk(salad_thinking=True))
+    key.write_text("key-two", encoding="utf-8")    # rotation = new identity
+    assert base != proxy_nonce(mk())
+
+
+def test_toml_multiline_and_indented_profile_lists():
+    text = (
+        '[[profiles]]\n'
+        'id = "w"\n'
+        '  adapter = "claude"          # indented on purpose\n'
+        'backend_ids = [\n'
+        '  "local1",   # a comment inside the array\n'
+        '  "local2",\n'
+        ']  # trailing comment\n'
+    )
+    out = append_to_profile_backend_lists(text, "s1", adapters={"claude"})
+    assert 'backend_ids = ["local1", "local2", "s1"]  # trailing comment' in out
+    assert "a comment inside the array" not in out
+    # idempotent, and the result still parses as TOML
+    assert append_to_profile_backend_lists(out, "s1",
+                                           adapters={"claude"}) == out
+    import tomllib
+    parsed = tomllib.loads(out)
+    assert parsed["profiles"][0]["backend_ids"] == ["local1", "local2", "s1"]
+
+
+def test_toml_remove_from_multiline_list():
+    text = (
+        '[[backends]]\n'
+        'id = "s1"\n'
+        'endpoint = "https://g.salad.cloud"\n'
+        'kind = "salad"\n'
+        'model_id = "qwen"\n'
+        'salad_proxy_port = 18100\n'
+        '\n'
+        '  [[profiles]]\n'
+        '  id = "w"\n'
+        '  adapter = "claude"\n'
+        '  backend_ids = [\n'
+        '    "local1",\n'
+        '    "s1",\n'
+        '  ]  # tail\n'
+    )
+    out = remove_salad_backend(text, "s1")
+    assert 'backend_ids = ["local1"]  # tail' in out
+    assert "s1" not in out
+
+
+def test_think_stripper_chunk_boundaries():
+    text = "<think>\n\n</think>\n\nHello"
+    for chunks in ([text],
+                   ["<think>\n\n</think>", "\n", "\nHello"],
+                   ["<thi", "nk>\n\n</think>\n", "\nHel", "lo"],
+                   ["<think>", "\n\n", "</think>", "\n\n", "Hello"]):
+        s = EmptyThinkStripper()
+        out = "".join(s.feed(c) for c in chunks) + s.flush()
+        assert out == "Hello", chunks
+
+
+def test_stream_builder_reports_input_tokens():
+    b = StreamBuilder("qwen", "u1")
+    frames = [b.message_start()]
+    frames += b.handle({"usage": {"prompt_tokens": 123, "completion_tokens": 4},
+                        "choices": [{"delta": {"content": "hi"},
+                                     "finish_reason": "stop"}]})
+    frames += b.finish()
+    delta = next(f for f in frames if "message_delta" in f)
+    payload = json.loads(delta.split("data: ", 1)[1])
+    assert payload["usage"] == {"input_tokens": 123, "output_tokens": 4}
+
+
+def test_pick_backend_skips_salad_for_cline(tmp_path):
+    from local_dispatcher.backends import BackendRegistry
+    from local_dispatcher.db import Database, now_iso
+    cfg = _cfg(18100)
+    db = Database(tmp_path / "t.db")
+    db.migrate()
+    reg = BackendRegistry(cfg, db)
+    reg.sync()
+    db.execute("UPDATE backends SET health='online', probed_at=? WHERE id='s0'",
+               (now_iso(),))
+    assert reg.pick_backend(["s0"]) == "s0"           # claude can use it
+    assert reg.pick_backend(["s0"], adapter="cline") is None
+    db.close()
+
+
+def test_config_rejects_bad_salad_ports(tmp_path):
+    p = tmp_path / "config.toml"
+
+    def write(*blocks):
+        p.write_text("\n".join(blocks), encoding="utf-8")
+
+    write('[[backends]]\nid = "a"\nendpoint = "https://a.salad.cloud"\n'
+          'kind = "salad"\nsalad_proxy_port = 18100\n',
+          '[[backends]]\nid = "b"\nendpoint = "https://b.salad.cloud"\n'
+          'kind = "salad"\nsalad_proxy_port = 18100\n')
+    with pytest.raises(ValueError, match="used by both"):
+        load_config(p)
+
+    write('[[backends]]\nid = "a"\nendpoint = "https://a.salad.cloud"\n'
+          'kind = "salad"\n')
+    with pytest.raises(ValueError, match="salad_proxy_port is required"):
+        load_config(p)
+
+
+def test_config_rejects_salad_backend_for_cline_profile(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text(
+        '[[backends]]\nid = "s"\nendpoint = "https://s.salad.cloud"\n'
+        'kind = "salad"\nsalad_proxy_port = 18100\n'
+        '[[profiles]]\nid = "c"\nadapter = "cline"\nbackend_ids = ["s"]\n',
+        encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot use salad"):
+        load_config(p)
+
+
 # -- upstream stream anomaly detection (salad_proxy) -------------------------------
 #
 # The live j_8bf0ff2baf failure: upstream returned 200, then the stream
@@ -191,7 +341,9 @@ from local_dispatcher.salad_proxy import StreamBuilder, _iter_sse
 class _LineSource:
     """Minimal http.client response stand-in: readline() over bytes."""
     def __init__(self, lines):
-        self._lines = [l if isinstance(l, bytes) else l.encode()
+        # b"" is EOF for readline(); an empty SSE separator line is b"\n".
+        self._lines = [b"\n" if l == "" else
+                       (l if isinstance(l, bytes) else l.encode())
                        for l in lines]
 
     def readline(self):
@@ -212,11 +364,24 @@ def test_iter_sse_normal_stream():
         "",              # event separator
         ": keepalive",   # SSE comment — fine, no anomaly
         "event: x",
+        "id: 42",        # standard SSE fields — fine, no anomaly
+        "retry: 3000",
         "data: [DONE]",
         _chunks([_content_delta("never")])[0],  # after DONE: not read
     ])))
-    assert [c["choices"][0]["delta"]["content"] for c in out] == ["a", "b"]
+    chunks = [c for c in out if "__proxy_done__" not in c]
+    assert [c["choices"][0]["delta"]["content"] for c in chunks] == ["a", "b"]
+    assert any(o.get("__proxy_done__") for o in out)
     assert not any("__proxy_anomaly__" in o for o in out)
+
+
+def test_iter_sse_error_null_is_not_terminal():
+    out = list(_iter_sse(_LineSource([
+        "data: " + json.dumps({"error": None, "choices": [
+            {"index": 0, "delta": {"content": "ok"}}]}) + "\n\n",
+    ])))
+    assert not any("__proxy_anomaly__" in o for o in out)
+    assert out and out[0]["choices"][0]["delta"]["content"] == "ok"
 
 
 def test_iter_sse_flags_anomalies():

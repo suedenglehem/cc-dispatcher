@@ -148,16 +148,19 @@ class DaemonHandle:
             return
         self._stopped = True
         self.stop_event.set()
-        self.thread.join(timeout=20)
-        if self.thread.is_alive():
-            raise RuntimeError("daemon thread did not stop in 20s")
-        if self.errors:
-            raise RuntimeError(f"daemon thread failed: {self.errors[0]}")
-        # Tests always tear salad proxies down (the production daemon
-        # leaves them for orphan adoption; here they would leak).
-        salad = self.state.get("salad")
-        if salad is not None:
-            salad.stop_all()
+        try:
+            self.thread.join(timeout=20)
+            if self.thread.is_alive():
+                raise RuntimeError("daemon thread did not stop in 20s")
+            if self.errors:
+                raise RuntimeError(f"daemon thread failed: {self.errors[0]}")
+        finally:
+            # Always reap the proxies, including when the test/daemon failed:
+            # the production daemon leaves them for orphan adoption, but in
+            # tests they would leak across the suite.
+            salad = self.state.get("salad")
+            if salad is not None:
+                salad.stop_all()
 
 
 def _daemon_body(cfg, state: dict, stop_event: threading.Event,

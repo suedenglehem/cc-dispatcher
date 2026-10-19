@@ -9,6 +9,7 @@ overridable per backend via ctx_override.
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
@@ -17,6 +18,8 @@ import httpx
 from .config import BackendConfig, Config, derive_max_context
 from .db import Database, now_iso
 from .salad import SALAD_KEYFILE_DEFAULT, read_salad_key
+
+log = logging.getLogger("dispatcherd.backends")
 
 
 def extract_ctx_max(body: dict) -> int | None:
@@ -58,9 +61,24 @@ class BackendRegistry:
         self._last_result: dict[str, ProbeResult] = {}
 
     # -- sync --------------------------------------------------------------
-    def sync(self) -> None:
+    def sync(self, *, preserve_runtime: bool = False,
+             allow_empty: bool = False) -> None:
         """Push config backends/groups into the DB (config is the source of truth
-        for topology; the DB tracks live health/probe state)."""
+        for topology; the DB tracks live health/probe state).
+
+        preserve_runtime: keep the DB's enabled/manually_reserved/reserved_note
+        for existing rows. Runtime config edits (salad add/remove) must not
+        silently undo `ladd backend set`; a daemon start passes False so the
+        config file reasserts itself as documented.
+
+        allow_empty: an empty backend list is normally a mistyped --config and
+        must not wipe the live state; the runtime remove-salad path knows the
+        emptiness is intentional and passes True.
+        """
+        runtime_update = "" if preserve_runtime else (
+            "enabled=excluded.enabled, "
+            "manually_reserved=excluded.manually_reserved, "
+            "reserved_note=excluded.reserved_note, ")
         with self.db.tx() as conn:
             for g in self.cfg.groups:
                 conn.execute(
@@ -78,9 +96,7 @@ class BackendRegistry:
                        ON CONFLICT(id) DO UPDATE SET endpoint=excluded.endpoint,
                        openai_base_url=excluded.openai_base_url,
                        model_id=excluded.model_id, model_label=excluded.model_label,
-                       enabled=excluded.enabled, is_primary=excluded.is_primary,
-                       manually_reserved=excluded.manually_reserved,
-                       reserved_note=excluded.reserved_note,
+                       """ + runtime_update + """is_primary=excluded.is_primary,
                        concurrency=excluded.concurrency, resource_group=excluded.resource_group,
                        notes=excluded.notes, kind=excluded.kind,
                        salad_keyfile=excluded.salad_keyfile,
@@ -105,9 +121,14 @@ class BackendRegistry:
                     f"SELECT id FROM backends WHERE id NOT IN ({placeholders})",
                     tuple(ids)).fetchall()
             else:
-                # config with no backends: every DB row is stale
-                # (NOT IN () is invalid SQL, hence the branch)
-                removed = conn.execute("SELECT id FROM backends").fetchall()
+                if allow_empty:
+                    # Intentional runtime removal of the last backend: every
+                    # remaining row is stale (NOT IN () is invalid SQL).
+                    removed = conn.execute("SELECT id FROM backends").fetchall()
+                else:
+                    log.warning("config has no backends; keeping existing "
+                                "backend rows")
+                    removed = []
             for (rid,) in removed:
                 referenced = (
                     conn.execute(
@@ -156,7 +177,8 @@ class BackendRegistry:
                 )
 
     # -- probes ------------------------------------------------------------
-    async def probe(self, backend_id: str, force: bool = False) -> ProbeResult:
+    async def probe(self, backend_id: str, force: bool = False,
+                    ensure_result: tuple[bool, str] | None = None) -> ProbeResult:
         now = time.monotonic()
         cached = self._last_probe.get(backend_id)
         if not force and cached is not None and now - cached < self.cfg.daemon.probe_ttl_s \
@@ -172,7 +194,10 @@ class BackendRegistry:
                 return self._last_result[backend_id]
             # The local proxy is the liveness precondition: without it the
             # gateway is unreachable for workers no matter what it serves.
-            up, detail = await self.salad.ensure(b)
+            # Callers that already ran ensure() pass the result here so the
+            # failure poll is not repeated (it can exceed the client timeout).
+            up, detail = (ensure_result if ensure_result is not None
+                          else await self.salad.ensure(b))
             if not up:
                 self._record(backend_id, now,
                              ProbeResult("offline", None, [], detail))
@@ -259,10 +284,15 @@ class BackendRegistry:
                     return False
         return True
 
-    def pick_backend(self, profile_backend_ids: list[str], preferred: str | None = None) -> str | None:
+    def pick_backend(self, profile_backend_ids: list[str], preferred: str | None = None,
+                     adapter: str | None = None) -> str | None:
         """First eligible backend: enabled, not primary, not manually reserved,
         online with a fresh probe, with free capacity. Preferred id first, then
-        config order."""
+        config order.
+
+        adapter: a cline worker speaks OpenAI chat completions directly; the
+        salad proxy only speaks Anthropic, so salad backends are skipped for
+        it (otherwise every request would 403 at the gateway)."""
         order = list(profile_backend_ids)
         if preferred and preferred in order:
             order.remove(preferred)
@@ -270,6 +300,8 @@ class BackendRegistry:
         for bid in order:
             b = self.cfg.backend(bid)
             if b is None or b.is_primary or not b.enabled or b.manually_reserved:
+                continue
+            if adapter == "cline" and b.kind == "salad":
                 continue
             row = self.db.query_one("SELECT * FROM backends WHERE id=?", (bid,))
             if row is None:

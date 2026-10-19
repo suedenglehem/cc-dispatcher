@@ -119,7 +119,13 @@ async def serve(cfg) -> None:
     # just marks the backend offline.
     for b in cfg.backends:
         if b.kind == "salad":
-            up, detail = await salad.ensure(b)
+            try:
+                up, detail = await salad.ensure(b)
+            except Exception:
+                # A bad backend must never crash the daemon into a restart
+                # loop; the probe reports it offline with the log detail.
+                log.exception("salad proxy for %s failed to start", b.id)
+                continue
             if not up:
                 log.warning("salad proxy for %s not up at startup: %s",
                             b.id, detail)

@@ -558,3 +558,47 @@ agents do the reasoning.
    latency note updated to say `sl_proxy.py` now handles it (not "if you
    extend"). Committed on_salad `f500326` (only the 2 changed files; user's
    `PROGRESS.md` left untouched), pushed to origin.
+   **Test instructions left for the user (same day):** a deterministic offline
+   regression suite `on_salad/tools/test_sl_proxy_offline.py` (**10/10**, no
+   group/TLS/money — drives the real `_iter_sse`+`StreamBuilder` over in-memory
+   streams; the proxy hard-exits on non-https so this is the logic gate) and
+   `on_salad/claude/TESTS.md` (step 0 offline + 3 live steps: `sl_curl.sh`
+   baseline → `cl_salad -p "…pong…"` no-over-trigger check → how the edge-kill
+   failure now surfaces). `claude/README.md` gained a `TESTS.md` file-table row.
+   Committed on_salad `5aa1b51` (only those 3 files; user's `PROGRESS.md`
+   untouched), pushed. User runs the **live** steps tomorrow once the group is up.
+9. Full-repo code review + fixes — **DONE (2026-10-19), working tree only (no git).**
+   High-effort review (8 parallel reviewers + line-by-line + cross-file + sweep)
+   over `local_dispatcher/`; all 27 verified findings fixed:
+   - **salad lifecycle/config**: proxy nonce now covers model/thinking/token cap/
+     key contents (rotated keys or config edits no longer adopt a stale proxy);
+     per-backend `ensure()` lock (no duplicate spawns); adopted/orphaned proxies
+     are found by nonce prefix in `/proc` and killed (stop works; leaked/hung
+     spawns reaped); stale own proxies replaced; spawn errors returned instead of
+     crashing startup; duplicate/zero proxy ports rejected at config load.
+   - **runtime state**: `sync()` gained `preserve_runtime` (salad add/remove no
+     longer undo `ladd backend set`) and `allow_empty` (a mistyped empty config
+     no longer deletes/tombstones live rows); `_reload_config` carries runtime
+     overrides; `_commit_config` handles relative and symlinked config paths and
+     reuses the config it already validated.
+   - **TOML editing**: profile `backend_ids` parsing handles multi-line arrays,
+     inner and trailing comments, and indented table headers; still idempotent.
+   - **proxy correctness**: streaming `message_delta` reports `input_tokens`;
+     non-streaming 200 bodies with `error`/no `choices` become 502 errors; legal
+     SSE `id:`/`retry:` lines accepted and `error: null` ignored; a complete
+     answer with trailing junk is kept, while content without finish_reason/
+     `[DONE]` is treated as truncated and retried; a client disconnect stops
+     upstream polling; fixed the chunk-boundary newline leak in
+     `EmptyThinkStripper` (fuzz-verified).
+   - **scheduling**: heartbeat runs as a detached, non-overlapping task (slow
+     gateways no longer delay reaping/deadlines/launches); the throttle fires the
+     first beat on a young monotonic clock and stamps after the attempt.
+   - **adapters/CLI/tests**: cline profiles may not use salad backends (validated
+     at load + guarded in `pick_backend`); `-a/-d` reject a stray subcommand;
+     `-d` ignores history tombstones and reports "already removed"; SO_REUSEADDR
+     on port checks; conftest teardown always reaps proxies; migration test now
+     validates numbering/names; dead code removed; `asyncio_default_fixture_loop_scope`
+     pinned.
+   Tests: **146 passed** (129 before + 17 new regression tests), warnings-as-errors
+   run green; the live `~/.config/local-dispatcher/config.toml` validates under
+   the new rules. All changes are uncommitted in the working tree.

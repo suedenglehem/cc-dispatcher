@@ -62,3 +62,48 @@ def test_removed_unreferenced_backend_is_deleted(env):
     _resync(env, h, [a])
     ids = {r["id"] for r in h.query("SELECT id FROM backends")}
     assert ids == {"a"}
+
+
+def _bare_cfg(*backends):
+    from local_dispatcher.config import (Config, DaemonConfig,
+                                         MyceliumConfig, WorkerConfig)
+    return Config(paths=None, daemon=DaemonConfig(), worker=WorkerConfig(),
+                  mycelium=MyceliumConfig(), backends=list(backends),
+                  groups=[], profiles=[], projects=[])
+
+
+def test_sync_preserve_runtime_keeps_backend_set(tmp_path):
+    """A runtime salad add/remove must not undo `ladd backend set`: that
+    path calls sync(preserve_runtime=True). A daemon start keeps the old
+    behavior (config reasserts itself)."""
+    from local_dispatcher.config import BackendConfig
+    b = BackendConfig(id="b1", endpoint="http://127.0.0.1:1234")
+    cfg = _bare_cfg(b)
+    db = Database(tmp_path / "t.db")
+    db.migrate()
+    BackendRegistry(cfg, db).sync()
+    db.execute("UPDATE backends SET enabled=0, manually_reserved=1, "
+               "reserved_note='manual' WHERE id='b1'")
+
+    BackendRegistry(cfg, db).sync(preserve_runtime=True)
+    row = db.query_one("SELECT * FROM backends WHERE id='b1'")
+    assert (row["enabled"], row["manually_reserved"],
+            row["reserved_note"]) == (0, 1, "manual")
+
+    BackendRegistry(cfg, db).sync()      # startup: config wins again
+    row = db.query_one("SELECT * FROM backends WHERE id='b1'")
+    assert (row["enabled"], row["manually_reserved"]) == (1, 0)
+    db.close()
+
+
+def test_sync_empty_config_does_not_wipe_backends(tmp_path):
+    """A mistyped --config that loads zero backends must not tombstone or
+    delete the live state's rows."""
+    from local_dispatcher.config import BackendConfig
+    a = BackendConfig(id="a", endpoint="http://127.0.0.1:1")
+    db = Database(tmp_path / "t.db")
+    db.migrate()
+    BackendRegistry(_bare_cfg(a), db).sync()
+    BackendRegistry(_bare_cfg(), db).sync()
+    assert {r["id"] for r in db.query("SELECT id FROM backends")} == {"a"}
+    db.close()

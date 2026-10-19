@@ -141,7 +141,7 @@ def test_heartbeat_beats_only_with_workers(env):
     # a worker running on the salad backend → the tick-path keepalive beats
     job = c.submit("p1", objective="hold", base_commit=env.repo_head,
                    allowed_scope=["src"], profile_id="w")["job_id"]
-    wait_for(lambda: gw.completions >= 1, 15, 0.1,
+    wait_for(lambda: gw.completions >= 1, 30, 0.1,
              "salad heartbeat while worker running")
     c.cancel(job)
     wait_job(c, job, "cancelled")
@@ -303,6 +303,21 @@ def _stream_from_proxy(port):
     return resp.status, events, raw
 
 
+def _post_from_proxy(port):
+    """One non-streaming POST /v1/messages; returns (status, JSON body)."""
+    body = _json.dumps({
+        "model": "qwen", "max_tokens": 64, "stream": False,
+        "messages": [{"role": "user", "content": "hi"}]}).encode()
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request("POST", "/v1/messages", body=body, headers={
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01"})
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8", "replace")
+    conn.close()
+    return resp.status, _json.loads(raw)
+
+
 def _text_deltas(raw):
     """Reassembled text_delta payloads of one SSE stream.
     (The fake answers with two content chunks, so "fake-ok" arrives as two
@@ -318,6 +333,7 @@ def _text_deltas(raw):
 @pytest.mark.parametrize("mode,expect", [
     ("stream", "ok"),
     ("stream_empty", "empty"),
+    ("stream_partial", "truncated"),
     ("stream_error_payload", "error"),
 ])
 def test_stream_failure_surfaced(env, mode, expect):
@@ -338,10 +354,66 @@ def test_stream_failure_surfaced(env, mode, expect):
             # contentless/anomalous stream: one error event, no clean finish
             assert "error" in events
             assert "message_stop" not in events
-            assert "upstream stream produced no content" in raw
+            if expect == "empty":
+                assert "upstream stream produced no content" in raw
+            else:
+                assert "upstream stream truncated" in raw
             if expect == "error":
                 # the in-band upstream error text is surfaced in the detail
                 assert "upstream exploded" in raw
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            proc.kill()
+
+
+def test_stream_complete_with_trailing_garbage_is_not_discarded(env):
+    """Legal SSE id:/retry: lines and a junk line AFTER a complete answer
+    (finish_reason + [DONE]) must not discard the received content."""
+    gw = _make_env(env)
+    gw.chat_mode = "stream_trailing_garbage"
+    port = _free_port()
+    proc = _spawn_proxy(gw, env._salad_keyfile, port)
+    try:
+        _wait_proxy(port, _REGRESS_NONCE)
+        status, events, raw = _stream_from_proxy(port)
+        assert status == 200
+        assert "message_stop" in events
+        assert "error" not in events
+        assert _text_deltas(raw) == "ok"
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            proc.kill()
+
+
+@pytest.mark.parametrize("mode,expect", [
+    ("json", "ok"),
+    ("json_error", "error"),
+    ("json_empty", "error"),
+])
+def test_non_stream_failure_surfaced(env, mode, expect):
+    """A 200 non-streaming body with an in-band error payload (or no choices)
+    must not become a clean empty assistant turn — same contract as the
+    streaming path."""
+    gw = _make_env(env)
+    gw.chat_mode = mode
+    port = _free_port()
+    proc = _spawn_proxy(gw, env._salad_keyfile, port)
+    try:
+        _wait_proxy(port, _REGRESS_NONCE)
+        status, body = _post_from_proxy(port)
+        if expect == "ok":
+            assert status == 200
+            assert body["content"][0]["text"] == "fake-ok"
+        else:
+            assert status == 502
+            assert body["type"] == "error"
+            assert "no content" in body["error"]["message"]
+            if mode == "json_error":
+                assert "engine died" in body["error"]["message"]
     finally:
         try:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)

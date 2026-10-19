@@ -88,6 +88,14 @@ class _Handler(BaseHTTPRequestHandler):
                 req = {}
             if req.get("stream") and gw.chat_mode != "json":
                 self._chat_stream(gw)
+            elif gw.chat_mode == "json_error":
+                # 200 with an in-band error payload and no completion
+                self._json(200, {"error": {"message": "engine died"}})
+            elif gw.chat_mode == "json_empty":
+                # 200 with no choices at all (zero-content completion)
+                self._json(200, {"id": "chat-fake", "choices": [],
+                                 "usage": {"prompt_tokens": 1,
+                                           "completion_tokens": 0}})
             else:
                 self._json(200, {
                     "id": "chat-fake",
@@ -105,8 +113,14 @@ class _Handler(BaseHTTPRequestHandler):
         - "stream":              normal two-delta completion + [DONE]
         - "stream_empty":        headers, then EOF — zero content (origin/
                                  edge killed the stream mid-flight)
+        - "stream_partial":      some content, then EOF with no completion
+                                 signal (truncated answer)
         - "stream_error_payload": one delta, then an in-band
                                  `data: {"error": ...}` payload, then EOF
+        - "stream_trailing_garbage": a complete answer (content +
+                                 finish_reason + [DONE]) with legal SSE
+                                 id:/retry: lines and one junk line before
+                                 the end — the answer must NOT be discarded
         """
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -133,10 +147,23 @@ class _Handler(BaseHTTPRequestHandler):
             self.wfile.write(b"data: [DONE]\n\n")
         elif gw.chat_mode == "stream_empty":
             pass  # nothing: the stream dies right after the headers
+        elif gw.chat_mode == "stream_partial":
+            # content, then EOF with no finish_reason and no [DONE]: the
+            # answer may be truncated — it must not be a clean success.
+            self.wfile.write(chunk("partial"))
         elif gw.chat_mode == "stream_error_payload":
             self.wfile.write(chunk("partial"))
             self.wfile.write(data({"error": {"message": "upstream exploded"}}))
             # no [DONE]: the stream ends with the error
+        elif gw.chat_mode == "stream_trailing_garbage":
+            self.wfile.write(chunk("ok"))
+            self.wfile.write(chunk(None, "stop"))
+            # legal SSE fields then junk BEFORE the end marker: the turn is
+            # already complete, so the proxy must finish normally.
+            self.wfile.write(b"id: 42\n")
+            self.wfile.write(b"retry: 3000\n")
+            self.wfile.write(b"<html>edge noise</html>\n")
+            self.wfile.write(b"data: [DONE]\n\n")
         self.wfile.flush()
 
     def log_message(self, *args):  # silence
