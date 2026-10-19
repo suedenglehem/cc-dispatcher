@@ -323,8 +323,36 @@ keeps the proxy alive, probes with the key, and schedules on it when online.
     up): `sl_curl.sh` baseline → `cl_salad -p "…pong…"` (proves no over-trigger) →
     the edge-kill failure now surfaces as an error instead of an empty answer.
 
-Next unfinished task: none in the dispatcher (P5 closed). on_salad: the user runs
-the live `claude/TESTS.md` steps tomorrow (salad group up); the offline suite
+11. **Full-repo code review + fixes (2026-10-19).** High-effort review over
+    `local_dispatcher/` (8 parallel reviewers + line-by-line + cross-file +
+    sweep). 27 verified findings, all fixed: identity-aware salad proxy nonce
+    (model/thinking/token-cap/key hash) + per-backend `ensure()` lock;
+    orphan/leaked proxy reaping by `/proc` nonce and stale-proxy replacement;
+    guarded spawn/startup; duplicate/zero `salad_proxy_port` validation;
+    `sync(preserve_runtime, allow_empty)` so salad add/remove no longer undo
+    `ladd backend set` or wipe rows on an empty config; realpath +
+    validated-config reuse in `_commit_config`; multi-line/indented
+    `backend_ids` TOML editing; streaming `input_tokens`; non-streaming 200
+    error/no-choices bodies → 502; legal SSE `id:`/`retry:` accepted and
+    `error: null` ignored; truncated (no finish_reason/`[DONE]`) and
+    contentless streams surface as errors; client disconnect stops upstream;
+    chunk-boundary stripper fix (fuzz-verified); detached non-overlapping
+    heartbeat; cline profiles cannot select salad backends; CLI `-a/-d`
+    subcommand guard and tombstone-aware `-d`; SO_REUSEADDR; conftest teardown;
+    migration numbering validation; 17 new regression tests.
+    Commands/results: `.venv/bin/python -m pytest -q` → **146 passed**;
+    `.venv/bin/python -W error::DeprecationWarning -m pytest -q` → **146
+    passed**; the live `~/.config/local-dispatcher/config.toml` loads under the
+    new validation. Committed **`be5f57e`**, pushed to `origin/main`.
+    **Known problem:** the running `dispatcherd` still executes pre-fix code
+    (no hot reload) — activate with `systemctl --user restart
+    local-dispatcher`; on restart the existing salad proxy (old nonce) is
+    replaced automatically.
+
+Next unfinished task: none in the dispatcher (P5 closed; review fixes are
+committed and pushed). Operational step left to the user: restart
+`local-dispatcher` so the reviewed code is live. on_salad: the user runs the
+live `claude/TESTS.md` steps tomorrow (salad group up); the offline suite
 already passes 10/10.
 
 ## Decisions log (condensed; full list in HANDOFF.md)

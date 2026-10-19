@@ -211,8 +211,9 @@ class BackendRegistry:
             if res.ctx_max is None:
                 res.ctx_max = await self._salad_ctx_via_proxy(b)
         else:
-            res = await _probe_endpoint(b.endpoint,
-                                        self.cfg.daemon.probe_timeout_s)
+            res = await _probe_endpoint(
+                b.endpoint, self.cfg.daemon.probe_timeout_s,
+                headers=_backend_auth_headers(b))
         if b.ctx_override:
             res.ctx_max = b.ctx_override
         self._record(backend_id, now, res)
@@ -365,6 +366,21 @@ class BackendRegistry:
                 entry["proxy"] = f"127.0.0.1:{b.salad_proxy_port}"
             out.append(entry)
         return out
+
+
+def _backend_auth_headers(b: BackendConfig) -> dict[str, str]:
+    """Auth headers for a local backend that requires an API key.
+
+    The same key the worker gets in ANTHROPIC_API_KEY (llama.cpp --api-key)
+    must also be sent by the probe, or a perfectly healthy authenticated
+    server reads as offline forever. Send both schemes; each server uses
+    the one it understands and ignores the other.
+    """
+    key = ((b.credential_env or {}).get("ANTHROPIC_API_KEY")
+           or (b.credential_env or {}).get("OPENAI_API_KEY"))
+    if not key:
+        return {}
+    return {"x-api-key": key, "Authorization": f"Bearer {key}"}
 
 
 async def _probe_endpoint(endpoint: str, timeout_s: float,

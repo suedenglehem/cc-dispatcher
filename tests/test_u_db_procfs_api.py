@@ -288,3 +288,15 @@ async def test_status_all_jobs_is_exempt_from_response_cap(db):
     resp2 = await srv._dispatch({"method": "status", "params": {}})
     assert resp2["ok"] is True
     assert resp2["result"]["jobs_terminal"]["count"] == 60
+
+
+def test_backend_auth_headers():
+    """A local backend's API key must reach the probe (llama.cpp --api-key);
+    without it a healthy authenticated server reads as offline forever."""
+    from local_dispatcher.backends import _backend_auth_headers
+    b = BackendConfig(id="b", endpoint="http://127.0.0.1:8080",
+                      credential_env={"ANTHROPIC_API_KEY": "k"})
+    assert _backend_auth_headers(b) == {
+        "x-api-key": "k", "Authorization": "Bearer k"}
+    assert _backend_auth_headers(
+        BackendConfig(id="c", endpoint="http://127.0.0.1:8080")) == {}
