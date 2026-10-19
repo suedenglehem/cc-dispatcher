@@ -17,7 +17,7 @@
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, **Cline PASS** (root-caused → `ccline` fix → real pass `j_bba5405826`), group cap proven live |
-| P5 | SaladCloud backends: `ladd -a/-d URL`, local Anthropic→OpenAI proxy, keyed probes, heartbeat | ✅ done (2026-10-19): 129/129 tests; register-while-stopped verified (503 path); **live online worker smoke PASS** (`j_d12f1ae064`, attempt 1, ~13.5 min) after fixing the proxy's clean-empty-stream bug |
+| P5 | SaladCloud backends: `ladd -a/-d URL`, local Anthropic→OpenAI proxy, keyed probes, heartbeat | ✅ done (2026-10-19): 129/129 tests; register-while-stopped verified (503 path); **live online worker smoke PASS** (`j_d12f1ae064`, attempt 1, ~13.5 min) after fixing the proxy's clean-empty-stream bug. Committed `3314331` |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
