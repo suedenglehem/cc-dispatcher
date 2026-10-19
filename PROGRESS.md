@@ -17,20 +17,23 @@
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, **Cline PASS** (root-caused → `ccline` fix → real pass `j_bba5405826`), group cap proven live |
-| P5 | SaladCloud backends: `ladd -a/-d URL`, local Anthropic→OpenAI proxy, keyed probes, heartbeat | ✅ done (2026-10-19): 123/123 tests; live register-while-stopped verified (503 path); live online worker smoke pending group boot |
+| P5 | SaladCloud backends: `ladd -a/-d URL`, local Anthropic→OpenAI proxy, keyed probes, heartbeat | ✅ done (2026-10-19): 129/129 tests; register-while-stopped verified (503 path); **live online worker smoke PASS** (`j_d12f1ae064`, attempt 1, ~13.5 min) after fixing the proxy's clean-empty-stream bug |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
   adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
   `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **123 passed, 0 skipped** (~108s, 2026-10-19) — the 19 added with P5 are the salad
-  feature: `tests/test_u_salad.py` (6 unit: gateway parsing, nonce, config-append/remove
-  splice + idempotence, profile-list rewrite, port allocation, keyfile) +
-  `tests/test_i_salad.py` (9 integration: add-while-stopped, online/stop/start flips via
+- Suite: **129 passed, 0 skipped** (~110s, 2026-10-19) — the 21 salad test cases added
+  with P5 (9 unit + 12 integration cases):
+  feature: `tests/test_u_salad.py` (9 unit: gateway parsing, nonce, config-append/remove
+  splice + idempotence, profile-list rewrite, port allocation, keyfile, `_iter_sse`
+  anomaly sentinels, `StreamBuilder` empty-vs-content incl. tool-only-is-not-empty) +
+  `tests/test_i_salad.py` (12 integration: add-while-stopped, online/stop/start flips via
   real ticks, key-rejected 403, error paths, a real worker job on a salad backend,
   30s heartbeat on the real tick path, remove + tombstone, orphan-proxy adoption,
-  `ladd -a/-d` CLI shorthand). Earlier: 6 with the P4-live bug fixes
+  `ladd -a/-d` CLI shorthand, parametrized real-proxy `test_stream_failure_surfaced`
+  ×3 SSE modes). Earlier: 6 with the P4-live bug fixes
   (`test_i_backend_rename.py` ×2, `test_u_results.py` ×4) + 2 for the ccline wrapper
 
 ## P3 (recovery / restart / memory / failure injection) — COMPLETE
@@ -229,11 +232,12 @@ so the last recorded suite result 108/108 + 20/20 acceptance still stands;
 both live smokes passed and recorded, backends re-secured, repo pushed in
 sync with GitHub). First real vast delegation awaits the user.
 
-## P5 (SaladCloud backends) — COMPLETE (code + tests 2026-10-19)
-Status: **code done, test-green (123/123), live verification in progress.** Workers can run
-on llama.cpp models served by a salad.cloud group through a local Anthropic→OpenAI proxy.
-The user starts/stops the groups themselves; the dispatcher only registers the URL, keeps
-the proxy alive, probes with the key, and schedules on it when online.
+## P5 (SaladCloud backends) — COMPLETE (2026-10-19, incl. live online worker smoke)
+Status: **code + tests done (129/129), live verification complete — register-while-stopped
+(503 path) AND a real worker job on the online group (attempt 1, succeeded).** Workers can
+run on llama.cpp models served by a salad.cloud group through a local Anthropic→OpenAI
+proxy. The user starts/stops the groups themselves; the dispatcher only registers the URL,
+keeps the proxy alive, probes with the key, and schedules on it when online.
 
 1. `ladd -a https://<group>.salad.cloud` / `ladd -d <url>` — top-level shorthand (id =
    first dot-label of the host; `-d` matches by normalized-gateway comparison). Full options
@@ -273,10 +277,37 @@ the proxy alive, probes with the key, and schedules on it when online.
 7. Live verification (2026-10-19): daemon restarted onto new code; `ladd -a
    https://tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` succeeded while the group was
    stopped — `proxy 127.0.0.1:18100, health offline — currently offline: HTTP 503`
-   (exactly the designed path). After the user started the group, the online flip + a real
-   worker job on the salad backend are the remaining live steps (pending at commit time).
+   (exactly the designed path).
+8. **Live online smoke — PASS (2026-10-19).** With the group running: idle TTFB ~1.7s
+   (small prompt) but ~93.3s for a worker-shaped ~5K-token prompt (prompt_tokens 5189,
+   [DONE] at 95.5s) — the Cloudflare front + one serializing group instance push
+   real 12–16K-token worker prompts to/past the edge's ~100s origin timeout. First live
+   job `j_8bf0ff2baf` hit that edge and failed as bogus `invalid_result` (bug below);
+   the re-submitted job **`j_d12f1ae064` succeeded on attempt 1** (~13.5 min, 8 turns,
+   30K-token input, exact requested `halve()` diff, all artifacts present).
+   Bug found & fixed live:
+   - **Proxy rendered zero-content/anomalous upstream streams as clean empty success.**
+     The upstream answered 200 and the SSE stream ended with no content (edge/origin
+     kill, in-band `data: {"error": …}` payload, or zero-token completion); the proxy
+     emitted a normal `message_stop` with empty content → the worker CLI recorded an
+     empty result → `invalid_result` (non-retryable) instead of a backend disconnect.
+     Fix in `salad_proxy.py`: `_iter_sse` yields `__proxy_anomaly__` sentinels
+     (non-SSE line, unparseable `data:`, top-level error payload — terminal);
+     `StreamBuilder` tracks `saw_content` (text via `EmptyThinkStripper` OR a registered
+     tool call) + `anomalies`; the streaming path checks `anomalies or is_empty()` after
+     the (pre-flushed) tail and emits ONE `error` event (`api_error`, "upstream stream
+     produced no content: …") instead of `finish()`. No adapter change — "api error"
+     text already classifies `backend_disconnect` (retryable). Tests: 3 new unit
+     (`test_u_salad.py`) + `test_stream_failure_surfaced` parametrized ×3 (ok /
+     empty / in-band-error) driving the REAL proxy subprocess against the fake gateway's
+     new SSE modes (`fake_salad_gateway.chat_mode`).
+9. **Performance envelope (live, 2026-10-19)** — for planning on salad groups:
+   small prompt TTFB ~1.7s; ~5K-token prompt ~93s; full worker job (8 turns,
+   30K-token prompts) ~13.5 min end-to-end. Expect the same order for real tasks:
+   a salad group is a latency-limited backend (one instance serializes; the
+   Cloudflare edge can 524 a stalled origin), not a throughput backend.
 
-Next unfinished task: finish the live online smoke (see HANDOFF.md).
+Next unfinished task: none — P5 closed. Optional: push to origin.
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
@@ -308,8 +339,8 @@ Next unfinished task: finish the live online smoke (see HANDOFF.md).
   these states on every daemon start.
 - **SaladCloud**: `tamarind-caraway-1rpqcqcnbbkmqdbv` (qwen, model label
   `qwen`) registered live via `ladd -a` 2026-10-19 while the group was
-  stopped (503 → `offline`, proxy on 127.0.0.1:18100). The user manages
-  group start/stop; the 30s probes follow the gateway. As of the last
-  check the gateway still answered 503 (group not actually serving yet) —
-  online worker smoke pending; flips `available` automatically on the next
-  probe once it serves 200.
+  stopped (503 → `offline`, proxy on 127.0.0.1:18100), flipped `available`
+  once the group started, and **served a real worker job to success**
+  (`j_d12f1ae064`, attempt 1, ~13.5 min). The user manages group start/stop;
+  the 30s probes follow the gateway. Known envelope: worker-shaped prompts
+  take ~90s+ TTFB (Cloudflare edge + serial instance) — see P5 §8–9.

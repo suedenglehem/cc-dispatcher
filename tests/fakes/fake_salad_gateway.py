@@ -9,7 +9,9 @@ gateway's observable behavior.
 - POST /v1/completions → 1-token completion (the daemon heartbeat target).
 - POST /v1/chat/completions → minimal OpenAI chat completion (upstream
                      target of salad_proxy.py; exercised by live smoke,
-                     here only for completeness).
+                     here only for completeness). When the request is
+                     streaming and `chat_mode` is set, responds with SSE
+                     instead (see chat_mode).
 
 `.stop_group()` emulates a stopped Salad group the way the Cloudflare
 front presents it: the host still answers, with HTTP 503. `.stop()` shuts
@@ -72,7 +74,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": "forbidden"})
             return
         length = int(self.headers.get("Content-Length") or 0)
-        self.rfile.read(length)
+        raw = self.rfile.read(length)
         p = self.path.split("?", 1)[0].rstrip("/")
         if p == "/v1/completions":
             gw.completions += 1
@@ -80,15 +82,62 @@ class _Handler(BaseHTTPRequestHandler):
                              "choices": [{"text": ".", "index": 0}]})
         elif p == "/v1/chat/completions":
             gw.chat_calls += 1
-            self._json(200, {
-                "id": "chat-fake",
-                "choices": [{"index": 0, "finish_reason": "stop",
-                             "message": {"role": "assistant",
-                                         "content": "fake-ok"}}],
-                "usage": {"prompt_tokens": 1, "completion_tokens": 1,
-                          "total_tokens": 2}})
+            try:
+                req = json.loads(raw or b"{}")
+            except Exception:
+                req = {}
+            if req.get("stream") and gw.chat_mode != "json":
+                self._chat_stream(gw)
+            else:
+                self._json(200, {
+                    "id": "chat-fake",
+                    "choices": [{"index": 0, "finish_reason": "stop",
+                                 "message": {"role": "assistant",
+                                             "content": "fake-ok"}}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                              "total_tokens": 2}})
         else:
             self._json(404, {"error": "not found"})
+
+    def _chat_stream(self, gw) -> None:
+        """SSE responses per gw.chat_mode:
+
+        - "stream":              normal two-delta completion + [DONE]
+        - "stream_empty":        headers, then EOF — zero content (origin/
+                                 edge killed the stream mid-flight)
+        - "stream_error_payload": one delta, then an in-band
+                                 `data: {"error": ...}` payload, then EOF
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+        def data(obj: dict) -> bytes:
+            return b"data: " + json.dumps(obj).encode() + b"\n\n"
+
+        def chunk(content: str | None = None,
+                  finish: str | None = None) -> bytes:
+            d: dict = {"role": "assistant"}
+            if content is not None:
+                d["content"] = content
+            return data({"id": "chat-fake",
+                         "choices": [{"index": 0, "delta": d,
+                                      "finish_reason": finish}]})
+
+        if gw.chat_mode == "stream":
+            self.wfile.write(chunk("fake-"))
+            self.wfile.write(chunk("ok"))
+            self.wfile.write(chunk(None, "stop"))
+            self.wfile.write(b"data: [DONE]\n\n")
+        elif gw.chat_mode == "stream_empty":
+            pass  # nothing: the stream dies right after the headers
+        elif gw.chat_mode == "stream_error_payload":
+            self.wfile.write(chunk("partial"))
+            self.wfile.write(data({"error": {"message": "upstream exploded"}}))
+            # no [DONE]: the stream ends with the error
+        self.wfile.flush()
 
     def log_message(self, *args):  # silence
         pass
@@ -103,6 +152,7 @@ class FakeSaladGateway:
         self.completions = 0     # heartbeat hits
         self.chat_calls = 0
         self.online = True
+        self.chat_mode: str = "json"  # or stream/stream_empty/stream_error_payload
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self.port: int | None = None

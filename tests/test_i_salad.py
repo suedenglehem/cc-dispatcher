@@ -222,3 +222,129 @@ def test_cli_shorthand_add_delete(env, capsys, monkeypatch):
     rc = main(["--config", cfg_path, "-d", "https://unknown.salad.cloud"])
     assert rc == 1
     assert "salad_not_found" in capsys.readouterr().err
+
+
+# -- streaming failure surfacing (regression: job j_8bf0ff2baf) -------------------
+#
+# Live failure mode: the group answered 200, but the stream ended with zero
+# content (edge/origin kill mid-flight, an in-band error payload, or a
+# zero-token completion). The proxy used to render that as a clean empty
+# Anthropic "success" — the CLI recorded an empty result and the dispatcher
+# logged invalid_result without retrying. Such streams must now produce one
+# `error` event so the CLI fails loudly and the adapter classifies it as a
+# retryable backend disconnect. The REAL salad_proxy.py subprocess is driven
+# here against the fake gateway's SSE modes.
+
+import http.client
+import json as _json
+import signal
+import socket as _socket
+import subprocess as _subprocess
+import sys as _sys
+
+from local_dispatcher.salad import PROXY_SCRIPT
+
+_REGRESS_NONCE = "regress-streaming"
+
+
+def _free_port() -> int:
+    s = _socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def _spawn_proxy(gw, keyfile, port):
+    args = [_sys.executable, str(PROXY_SCRIPT),
+            "--port", str(port),
+            "--host", "127.0.0.1",
+            "--upstream", gw.gateway_url + "/v1/chat/completions",
+            "--model", "qwen",
+            "--keyfile", str(keyfile),
+            "--thinking", "0",
+            "--nonce", _REGRESS_NONCE,
+            "--allow-http-upstream"]
+    return _subprocess.Popen(args, stdout=_subprocess.DEVNULL,
+                             stderr=_subprocess.DEVNULL,
+                             start_new_session=True)
+
+
+def _wait_proxy(port, nonce, timeout=15.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
+            conn.request("GET", "/healthz")
+            body = _json.loads(conn.getresponse().read())
+            conn.close()
+            if body.get("nonce") == nonce:
+                return
+        except Exception:
+            pass
+        time.sleep(0.1)
+    raise AssertionError("proxy did not come up on %d" % port)
+
+
+def _stream_from_proxy(port):
+    """One streaming POST /v1/messages; returns (status, event names, body)."""
+    body = _json.dumps({
+        "model": "qwen", "max_tokens": 64, "stream": True,
+        "messages": [{"role": "user", "content": "hi"}]}).encode()
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request("POST", "/v1/messages", body=body, headers={
+        "content-type": "application/json",
+        "anthropic-version": "2023-06-01"})
+    resp = conn.getresponse()
+    raw = resp.read().decode("utf-8", "replace")
+    conn.close()
+    events = [ln.split(":", 1)[1].strip()
+              for ln in raw.splitlines() if ln.startswith("event: ")]
+    return resp.status, events, raw
+
+
+def _text_deltas(raw):
+    """Reassembled text_delta payloads of one SSE stream.
+    (The fake answers with two content chunks, so "fake-ok" arrives as two
+    separate text_delta frames and never appears contiguously in raw.)"""
+    out = []
+    for ln in raw.splitlines():
+        if ln.startswith("data: ") and '"text_delta"' in ln:
+            out.append(_json.loads(ln[len("data: "):])
+                       .get("delta", {}).get("text", ""))
+    return "".join(out)
+
+
+@pytest.mark.parametrize("mode,expect", [
+    ("stream", "ok"),
+    ("stream_empty", "empty"),
+    ("stream_error_payload", "error"),
+])
+def test_stream_failure_surfaced(env, mode, expect):
+    gw = _make_env(env)
+    gw.chat_mode = mode
+    port = _free_port()
+    proc = _spawn_proxy(gw, env._salad_keyfile, port)
+    try:
+        _wait_proxy(port, _REGRESS_NONCE)
+        status, events, raw = _stream_from_proxy(port)
+        assert status == 200
+        if expect == "ok":
+            # normal stream: unchanged, clean finish with content
+            assert "message_stop" in events
+            assert "error" not in events
+            assert _text_deltas(raw) == "fake-ok"
+        else:
+            # contentless/anomalous stream: one error event, no clean finish
+            assert "error" in events
+            assert "message_stop" not in events
+            assert "upstream stream produced no content" in raw
+            if expect == "error":
+                # the in-band upstream error text is surfaced in the detail
+                assert "upstream exploded" in raw
+    finally:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except Exception:
+            proc.kill()
+        proc.wait(timeout=10)

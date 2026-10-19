@@ -185,7 +185,20 @@ Operational notes:
 - Live verification (2026-10-19): `ladd -a` against a **stopped** group
   registered cleanly — the gateway answered its 503 "group stopped" page and
   the backend came up `offline` with its proxy running, exactly the designed
-  behavior for a dead URL. The online path (probe with ctx, and a real worker
-  job over the TLS chat upstream) is covered by the test suite against a fake
-  gateway; the live online smoke is pending the group actually booting
-  (gateway still answered 503 as of the last check).
+  behavior for a dead URL.
+- **Live online worker smoke — PASS (2026-10-19).** With the group running:
+  idle TTFB ~1.7s (small prompt), ~93s for a worker-shaped ~5K-token prompt
+  (the Cloudflare front sits in front of the origin, and one group instance
+  serializes requests — real 12–16K-token worker prompts sit at/past the
+  edge's ~100s origin timeout). The first live job (`j_8bf0ff2baf`) hit that
+  edge: the upstream answered 200 but the stream ended with **zero content**,
+  and the proxy rendered that as a clean empty turn → bogus `invalid_result`.
+  Fixed in `salad_proxy.py`: a zero-content or anomalous stream end (in-band
+  `{"error": …}` payload, non-SSE line, unparseable `data:`) now yields one
+  `error` event, which the adapter classifies as retryable
+  `backend_disconnect` — never a fake success. The re-submitted job
+  (`j_d12f1ae064`) **succeeded on attempt 1** (~13.5 min, 8 turns,
+  30K-token prompts) with the exact requested diff. Regression tests:
+  `tests/test_u_salad.py` (`_iter_sse` anomaly sentinels, `StreamBuilder`
+  empty-vs-content) and the parametrized real-proxy `test_stream_failure_surfaced`
+  in `tests/test_i_salad.py`.

@@ -70,24 +70,38 @@ agents do the reasoning.
     the field is now documented in the packet and the validator accepts a memory id as number
     or string (`test_u_results.py`, +4).
   **full suite 102 passed / 0 skipped**
-- P5 (SaladCloud backends): **code + tests complete (2026-10-19); live online smoke
-  pending group boot** — salad.cloud groups as first-class backends: `ladd -a/-d <url>`
-  shorthand + `ladd backend add-salad/remove-salad`; vendored stdlib-only local proxy
-  (Anthropic in / OpenAI out, rewrites every upstream request to the served alias, injects
-  the `Salad-Api-Key` from the keyfile, keyed `/__upstream/` passthrough for ctx);
+- P5 (SaladCloud backends): **COMPLETE (2026-10-19, incl. live online worker smoke
+  PASS)** — salad.cloud groups as first-class backends: `ladd -a/-d <url>` shorthand +
+  `ladd backend add-salad/remove-salad`; vendored stdlib-only local proxy (Anthropic in /
+  OpenAI out, rewrites every upstream request to the served alias, injects the
+  `Salad-Api-Key` from the keyfile, keyed `/__upstream/` passthrough for ctx);
   orphan-proxy adoption by stable nonce (proxies survive daemon restarts, re-adopted,
   never duplicated — same philosophy as workers under the SIGTERM decision); 30s 1-token
   heartbeat per active salad reservation (keeps `IDLE_SHUTDOWN=heartbeat` groups alive);
   a stopped group (HTTP 503) is a normal `offline` state, NOT an error — register-while-
   stopped verified LIVE (2026-10-19): `ladd -a https://tamarind-caraway-1rpqcqcnbbkmqdbv.
   salad.cloud` → "added salad backend …: proxy 127.0.0.1:18100, health offline —
-  currently offline: HTTP 503". Two real bugs fixed along the way: `backends.sync()`
+  currently offline: HTTP 503". **Live online smoke PASS (2026-10-19):** once the group
+  was serving, probes went `available` with ctx; first live job `j_8bf0ff2baf` failed as
+  bogus `invalid_result` — the upstream answered 200 but the stream ended with **zero
+  content** (worker-shaped ~5K-token prompts take ~93s TTFB through the Cloudflare
+  front + one serializing instance, right at the edge's ~100s origin timeout) and the
+  proxy rendered that as a clean empty turn. **Fixed in `salad_proxy.py`:**
+  `_iter_sse` yields `__proxy_anomaly__` sentinels (non-SSE line, unparseable `data:`,
+  top-level error payload); `StreamBuilder` tracks `saw_content` + `anomalies`;
+  zero-content/anomalous stream end emits ONE `error` event → adapter classifies
+  retryable `backend_disconnect` (no adapter change). Re-submitted job
+  **`j_d12f1ae064` SUCCEEDED attempt 1** (~13.5 min, 8 turns, 30K-token prompts, exact
+  requested `halve()` diff, all artifacts). Live envelope: small-prompt TTFB ~1.7s,
+  worker-shaped ~93s. Three bugs fixed along the way: `backends.sync()`
   never pruned stale DB rows when the config had zero backends (and the prune loop was
   latent-broken on HEAD's non-empty path) → restructured, guarded by
   `tests/test_i_backend_rename.py` (2); `_TABLE_HDR` regex missed `[[array-of-tables]]`
-  headers so config splices skipped the backends/profiles tables. **Full suite 123 passed
-  / 0 skipped** (+19: `test_u_salad.py` 6 unit + `test_i_salad.py` 9 integration, incl. a
-  real worker job on a salad backend and the heartbeat on the real tick path).
+  headers so config splices skipped the backends/profiles tables; the clean-empty-stream
+  bug above (+3 unit tests, +1 parametrized real-proxy integration test ×3 SSE modes).
+  **Full suite 129 passed / 0 skipped** (salad: `test_u_salad.py` 9 unit +
+  `test_i_salad.py` 12 integration cases, incl. a real worker job on a salad backend and
+  the heartbeat on the real tick path).
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
 - Symptom: 4 daemon-spawned workers on the OLD daemon (pid 16445) died exit 143 (SIGTERM, class=crash),
@@ -161,7 +175,15 @@ agents do the reasoning.
   the keyfile; GET `/v1/models` echoes the alias (claude CLI compatibility); `/healthz`
   echoes `--nonce`; GET `/__upstream/<path>` keyed passthrough (ctx via `/props`);
   `--allow-http-upstream` = TEST-ONLY, loopback hosts only (public Salad gateways are
-  https; a plain-http upstream is a SystemExit otherwise).
+  https; a plain-http upstream is a SystemExit otherwise). **Streaming-failure
+  surfacing (fix for live `j_8bf0ff2baf`):** `_iter_sse` yields
+  `__proxy_anomaly__` sentinels instead of silently dropping non-SSE lines /
+  unparseable `data:` payloads (a top-level `{"error": …}` is terminal);
+  `StreamBuilder` tracks `saw_content` (real text through the EmptyThinkStripper OR a
+  registered tool call) + `anomalies`; the streaming handler emits ONE `error` event
+  (`api_error`, "upstream stream produced no content: …") when the stream ends
+  zero-content or anomalous — never a fake clean `message_stop` — so the worker CLI
+  fails loudly and the adapter classifies retryable `backend_disconnect`.
 - `local_dispatcher/salad.py` (NEW) — manager + config plumbing: `SaladProxyManager`
   (spawn/adopt by nonce `dispatcherd-<id>-<port>-<md5(endpoint)[:8]>` — stable across
   daemon restarts; `ensure`/`stop`/`stop_all`; `heartbeat_tick(db)`: 1-token
@@ -201,18 +223,26 @@ agents do the reasoning.
   worker `ANTHROPIC_BASE_URL` via `worker_endpoint()` (salad → the local proxy, so the
   claude CLI sees a plain Anthropic endpoint). `local_dispatcher/migrations/0002_salad.sql`
   (kind, salad_keyfile, salad_proxy_port, salad_thinking, salad_heartbeat).
-- `tests/test_u_salad.py` (NEW, 6) — gateway normalization, nonce stability,
+- `tests/test_u_salad.py` (9) — gateway normalization, nonce stability,
   config append/remove splice + idempotence, profile-list rewrite (claude-only),
-  port allocation, keyfile handling. `tests/test_i_salad.py` (NEW, 9) —
-  add-while-stopped (503 path, proxy up, nonce match), online→stop→start flips through
-  real ticks, key rejected (403 → `key_rejected`), error paths, **a real worker job
-  submitted and `succeeded` with `attempt.backend_id` = the salad backend**, heartbeat
-  (completions 0 pre-reservation, ≥1 within 15s of a hold job on the real tick path,
-  then cancel), remove (config/DB/proxy cleanup + tombstone + `salad_not_found`),
-  orphan-proxy adoption (fresh manager re-adopts by nonce, no duplicate), CLI
-  shorthand (id derivation + `salad_not_found`). `tests/fakes/fake_salad_gateway.py`
-  (NEW) — keyed threaded http.server: 503 when stopped, `/v1/models` (llama.cpp shape),
-  `/props`, `/v1/completions`, `/v1/chat/completions`, call counters.
+  port allocation, keyfile handling, `_iter_sse` (normal stream + anomaly sentinels:
+  non-SSE line, unparseable `data:`, terminal top-level error payload),
+  `StreamBuilder` empty-vs-content (empty stream is empty; text or a tool-only turn is
+  NOT). `tests/test_i_salad.py` (12 cases) — add-while-stopped (503 path, proxy up,
+  nonce match), online→stop→start flips through real ticks, key rejected (403 →
+  `key_rejected`), error paths, **a real worker job submitted and `succeeded` with
+  `attempt.backend_id` = the salad backend**, heartbeat (completions 0 pre-reservation,
+  ≥1 within 15s of a hold job on the real tick path, then cancel), remove
+  (config/DB/proxy cleanup + tombstone + `salad_not_found`), orphan-proxy adoption
+  (fresh manager re-adopts by nonce, no duplicate), CLI shorthand (id derivation +
+  `salad_not_found`), **`test_stream_failure_surfaced` parametrized ×3** (regression for
+  `j_8bf0ff2baf`: drives the REAL `salad_proxy.py` subprocess against the fake
+  gateway's SSE modes — `stream` → clean finish + reassembled text; `stream_empty` and
+  `stream_error_payload` → one `error` event, no `message_stop`, upstream error text
+  surfaced in the detail). `tests/fakes/fake_salad_gateway.py`
+  — keyed threaded http.server: 503 when stopped, `/v1/models` (llama.cpp shape),
+  `/props`, `/v1/completions`, `/v1/chat/completions` (incl. `chat_mode` SSE modes:
+  `stream` / `stream_empty` / `stream_error_payload`), call counters.
   `tests/conftest.py` — `SaladProxyManager` wired into the daemon fixture; `stop()`
   calls `salad.stop_all()`; fake gateways stopped with the daemon.
 - Docs: `docs/commands.md` ("Salad backends" section: shorthand + full options, add/
@@ -410,7 +440,7 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **123 passed, 0 skipped** (2026-10-19) — **20/20 acceptance tests green**
+- pytest: **129 passed, 0 skipped** (2026-10-19) — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
   (temp store, user `~/.mycelium` untouched — 1.9s / 4.4s / 2.3s); P2 mcp_adapter (8): green
@@ -426,9 +456,11 @@ agents do the reasoning.
   **ccline wrapper ×2 — real `bin/ccline` against a fake `cline` shim: auth args
   (-b baseUrl / -m model / -k key / --data-dir) + unchanged-argv forwarding +
   missing-data-dir / missing-OPENAI_API_BASE / no-key negatives**) green
-- P5: `test_u_salad.py` (6 unit) + `test_i_salad.py` (9 integration) green — incl. a real
-  worker job on a salad backend end-to-end and the 30s heartbeat asserted on the REAL tick
-  path (no monkeypatching: first tick after a reservation beats immediately).
+- P5: `test_u_salad.py` (9 unit) + `test_i_salad.py` (12 integration cases) green — incl. a real
+  worker job on a salad backend end-to-end, the 30s heartbeat asserted on the REAL tick
+  path (no monkeypatching: first tick after a reservation beats immediately), and
+  `test_stream_failure_surfaced` ×3 driving the REAL proxy subprocess against the fake
+  gateway's SSE modes (regression for the live clean-empty-stream failure).
 - Unit (57): ctx extraction ×3 probe shapes, `context_pct` math/boundary/unknown (4), claude
   `classify` overflow-threshold (3), packet renderer, result validator + evaluate_attempt decision
   table + recovery-context bounding, migrations, event pruning, procfs identity/liveness, API redaction +
@@ -496,20 +528,20 @@ agents do the reasoning.
    requested recheck, and a mid-job backend stop classifies `backend_disconnect`
    (retryable, may relaunch on the other online backend). Verified after restart:
    i7 available/online, ak offline. Mycelium #215 pinned (OVERRIDES-PRIOR).
-7. **P5 live online smoke (2026-10-19, PENDING GROUP BOOT):** the register-while-stopped
-   path is verified live (`ladd -a https://tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud`
-   → proxy 18100 + `health offline — HTTP 503`). The user reported the group up
-   2026-10-19, but the gateway still answered its 503 "group stopped" page at
-   every check since (not a key issue — key rejection would be 403); reported to
-   the user, group state to be checked on their side. When the user's group
-   comes up:
-   (a) `ladd workers --refresh` → expect the salad row `available` with `ctx_limit`
-   (probed n_ctx × 0.90); (b) tiny real worker job on the scratch demo-repo:
-   `ladd submit "<tiny task>" <demo-repo base sha> cc-worker --backend
-   tamarind-caraway-1rpqcqcnbbkmqdbv --scope src --project demo` → verify
-   `succeeded` + attempt `backend_id == tamarind-caraway-1rpqcqcnbbkmqdbv`; (c) record
-   the outcome in `docs/commands.md` (live-smoke line) + PROGRESS/HANDOFF. Leave the
-   backend registered afterwards (offline while the group is stopped is the normal,
-   desired state). A 300s background poll on the gateway finished 2026-10-19
-   with "still 503" — re-arm a poll or re-curl when the user confirms the
-   group is (re)started.
+7. ~~P5 live online smoke~~ ✅ **DONE (2026-10-19) — PASS.** The group booted (gateway
+   200); `ladd workers --refresh` flipped the salad row `available` with ctx_limit
+   (probed n_ctx × 0.90). First live job `j_8bf0ff2baf` failed as bogus
+   `invalid_result`: the upstream answered 200 but the stream ended with zero content
+   at the Cloudflare edge's ~100s origin timeout (measured TTFB: ~1.7s small prompt,
+   ~93.3s for a ~5K-token worker-shaped prompt) and the old proxy rendered that as a
+   clean empty turn. Fixed in `salad_proxy.py` (anomaly sentinels +
+   `StreamBuilder.saw_content`/`anomalies` + one `error` event → retryable
+   `backend_disconnect`; no adapter change), regression-tested (3 unit + 1
+   parametrized real-proxy integration ×3), suite 129/129, live proxy restarted onto
+   the fixed code (pid 86927). Re-submitted job **`j_d12f1ae064` SUCCEEDED on
+   attempt 1** (~13.5 min: 03:02:44→03:16:24Z, 8 turns, 30K-token input, exact
+   requested `halve()` diff in `src/app.py`, worker committed `6df3a7b`, all
+   artifacts present, `attempt.backend_id = tamarind-caraway-1rpqcqcnbbkmqdbv`).
+   Outcome recorded in `docs/commands.md` (live-smoke line), PROGRESS.md P5 §8–9.
+   Backend left registered (the desired state — offline while the group is stopped
+   is normal).

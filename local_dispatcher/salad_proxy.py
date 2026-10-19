@@ -440,21 +440,40 @@ def openai_to_anthropic(resp, model):
 # OpenAI streaming -> Anthropic streaming (incremental)
 # --------------------------------------------------------------------------- #
 def _iter_sse(resp):
-    """Yield parsed JSON objects from an upstream 'data: ...' SSE body until [DONE]."""
+    """Yield parsed JSON objects from an upstream 'data: ...' SSE body until [DONE].
+
+    Also yields anomaly sentinels ({"__proxy_anomaly__": <text>}) for anything
+    that is not a valid chunk: plain non-SSE lines (e.g. an error page served
+    mid-stream), unparseable 'data:' payloads, and JSON objects carrying a
+    top-level 'error' key. Callers surface these instead of silently
+    finishing an empty stream as a clean success."""
     while True:
         raw = resp.readline()
         if not raw:
             return
         line = raw.decode("utf-8", "replace").strip()
+        if not line:
+            continue  # SSE event separator
         if not line.startswith("data:"):
+            # SSE comments/keepalives (": ...") and 'event:' lines are fine;
+            # anything else is not SSE at all — flag it, don't skip it.
+            if not line.startswith(":") and not line.startswith("event:"):
+                yield {"__proxy_anomaly__": "non-SSE line from upstream: %r"
+                       % line[:200]}
             continue
         data = line[len("data:"):].strip()
         if data == "[DONE]":
             return
         try:
-            yield json.loads(data)
+            obj = json.loads(data)
         except Exception:
+            yield {"__proxy_anomaly__": "unparseable 'data:' line: %r" % data[:200]}
             continue
+        if isinstance(obj, dict) and "error" in obj:
+            yield {"__proxy_anomaly__": "upstream error payload: %s"
+                   % json.dumps(obj.get("error"), default=str)[:400]}
+            return  # error payloads are terminal
+        yield obj
 
 
 class StreamBuilder:
@@ -469,6 +488,8 @@ class StreamBuilder:
         self.tools = {}
         self.finish_reason = None
         self.usage_out = 0
+        self.saw_content = False
+        self.anomalies = []
         self.strip = EmptyThinkStripper()  # see the stripper section above
 
     def _aidx(self):
@@ -484,6 +505,9 @@ class StreamBuilder:
 
     def handle(self, chunk):
         out = []
+        if "__proxy_anomaly__" in chunk:
+            self.anomalies.append(chunk["__proxy_anomaly__"])
+            return out
         if isinstance(chunk.get("usage"), dict):
             self.usage_out = chunk["usage"].get("completion_tokens") or self.usage_out
         choices = chunk.get("choices") or []
@@ -507,8 +531,15 @@ class StreamBuilder:
             return []
         return self._text_raw(t)
 
+    def is_empty(self):
+        """True when nothing usable (text or tool use) ever came through.
+        Callers should flush any stripper-buffered tail first and treat a
+        non-empty tail as content too."""
+        return not self.saw_content and not self.tools
+
     def _text_raw(self, t):
         out = []
+        self.saw_content = True
         if not self.text_open:
             self.text_open = True
             self.text_index = self._aidx()
@@ -542,6 +573,7 @@ class StreamBuilder:
             tid = tc.get("id") or ("toolu_%s_%d" % (self.uid, i))
             self.tools[i] = {"aidx": aidx, "id": tid,
                              "name": fn.get("name"), "args": ""}
+            self.saw_content = True
             out.append(_ev("content_block_start", {"type": "content_block_start",
                 "index": aidx,
                 "content_block": {"type": "tool_use", "id": tid,
@@ -551,9 +583,10 @@ class StreamBuilder:
             self.tools[i]["args"] += args
         return out
 
-    def finish(self):
+    def finish(self, tail=None):
         out = []
-        tail = self.strip.flush()  # a block that never closed is real content
+        if tail is None:
+            tail = self.strip.flush()  # a block that never closed is real content
         if tail:
             out.extend(self._text_raw(tail))
         ct = self._close_text()
@@ -701,8 +734,28 @@ class Handler(BaseHTTPRequestHandler):
                 for chunk in _iter_sse(resp):
                     for frame in b.handle(chunk):
                         self._write(frame)
-                for frame in b.finish():
-                    self._write(frame)
+                tail = b.strip.flush()
+                if b.anomalies or (not tail and b.is_empty()):
+                    # A stream that ended without content is never a valid
+                    # turn for the agent loop (thinking is off; tool-only
+                    # turns carry tool_calls). Surfaced causes seen live:
+                    # the origin/edge killing the stream mid-flight, an
+                    # in-band error payload, or a zero-token completion.
+                    # Emit one error event instead of a clean empty finish
+                    # so the CLI fails loudly and the dispatcher can
+                    # classify + retry rather than recording a bogus
+                    # invalid_result.
+                    detail = "; ".join(b.anomalies[:3]) or (
+                        "stream ended with no content "
+                        "(finish_reason=%s, output_tokens=%d)"
+                        % (b.finish_reason, b.usage_out))
+                    self._write(_ev("error", {"type": "error",
+                                 "error": {"type": "api_error",
+                                           "message": "upstream stream "
+                                           "produced no content: %s" % detail}}))
+                else:
+                    for frame in b.finish(tail):
+                        self._write(frame)
             except Exception as e:
                 self._write(_ev("error", {"type": "error",
                              "error": {"type": "api_error",
