@@ -545,3 +545,16 @@ agents do the reasoning.
    Outcome recorded in `docs/commands.md` (live-smoke line), PROGRESS.md P5 §8–9.
    Backend left registered (the desired state — offline while the group is stopped
    is normal).
+8. on_salad `sl_proxy.py` zero-content fix — **DONE (2026-10-19), ported + pushed.**
+   User noted the on_salad project (`/dd2/andrei/docker/on_salad/claude/sl_proxy.py`,
+   the original bridge this repo's `salad_proxy.py` was vendored from) had the
+   identical pre-fix bug, affecting interactive `cl_salad`/`sl_chat.sh` sessions.
+   Ported the same 4-part fix verbatim: `_iter_sse` anomaly sentinels,
+   `StreamBuilder.saw_content`/`anomalies` + `is_empty()`, `finish(tail=None)`,
+   and the streaming-path `anomalies or (not tail and is_empty())` → one `error`
+   event. Verified offline (no live group — user stopped it): 12/12 logic checks
+   pass over empty/think-only/non-SSE/in-band-error/unparseable/text/tool-only
+   shapes; syntax clean; single `finish()` call site updated. `claude/README.md`
+   latency note updated to say `sl_proxy.py` now handles it (not "if you
+   extend"). Committed on_salad `f500326` (only the 2 changed files; user's
+   `PROGRESS.md` left untouched), pushed to origin.
