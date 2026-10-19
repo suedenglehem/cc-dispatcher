@@ -126,6 +126,13 @@ class Scheduler:
 
     async def tick(self) -> None:
         await self._probe_due()
+        # Keep IDLE_SHUTDOWN=heartbeat salad groups alive while a worker is
+        # actually running on them (mirrors the cl_salad keepalive).
+        if self.backends.salad is not None:
+            try:
+                await self.backends.salad.heartbeat_tick(self.db)
+            except Exception:
+                log.exception("salad heartbeat failed")
         await self._reap()
         await self._context_watch()
         await self._deadline_check()

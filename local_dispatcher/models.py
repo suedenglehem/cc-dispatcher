@@ -65,6 +65,17 @@ class ErrorCodes:
     BACKEND_PRIMARY = "backend_primary"
     PROJECT_PATH_INVALID = "project_path_invalid"
     PROJECT_EXISTS = "project_exists"
+    # salad backends
+    SALAD_URL_INVALID = "salad_url_invalid"
+    SALAD_ID_EXISTS = "salad_id_exists"
+    SALAD_KEYFILE_MISSING = "salad_keyfile_missing"
+    SALAD_PORT_EXHAUSTED = "salad_port_exhausted"
+    SALAD_PORT_IN_USE = "salad_port_in_use"
+    SALAD_PROXY_FAILED = "salad_proxy_failed"
+    SALAD_CONFIG_INVALID = "salad_config_invalid"
+    SALAD_BACKEND_BUSY = "salad_backend_busy"
+    SALAD_NOT_FOUND = "salad_not_found"
+    SALAD_REMOVE_FAILED = "salad_remove_failed"
     # transport
     DAEMON_NOT_RUNNING = "daemon_not_running"
     INTERNAL = "internal"
@@ -147,6 +158,22 @@ class BackendSetParams(BaseModel):
     enabled: bool | None = None
     reserved: bool | None = None
     note: str = ""
+
+
+class BackendAddSaladParams(BaseModel):
+    url: str = Field(min_length=1)
+    id: str | None = Field(default=None, pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")
+    port: int | None = Field(default=None, ge=1024, le=65535)
+    keyfile: str = ""
+    model: str = Field(default="qwen", min_length=1)
+    thinking: bool = False
+    concurrency: int = Field(default=1, ge=1)
+    resource_group: str = ""
+    notes: str = ""
+
+
+class BackendRemoveSaladParams(BaseModel):
+    backend_id: str
 
 
 class ProjectAddParams(BaseModel):

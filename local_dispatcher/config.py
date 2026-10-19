@@ -128,6 +128,27 @@ class BackendConfig:
     resource_group: str = ""
     ctx_override: int = 0
     notes: str = ""
+    # kind = "salad": endpoint is a public salad.cloud gateway URL. Claude
+    # Code cannot talk to it directly (OpenAI-only API, Salad-Api-Key header
+    # auth) — the daemon runs a local salad_proxy.py on salad_proxy_port and
+    # workers point ANTHROPIC_BASE_URL at the proxy. The user starts/stops
+    # the Salad group themselves; the daemon only probes and proxies.
+    kind: str = "local"
+    salad_keyfile: str = ""
+    salad_proxy_port: int = 0
+    salad_thinking: bool = False
+    salad_heartbeat: bool = True
+
+
+def worker_endpoint(b: BackendConfig) -> str:
+    """The URL a worker's ANTHROPIC_BASE_URL must use for this backend.
+
+    Local backends: the endpoint itself. Salad backends: the daemon-managed
+    local proxy (it is the only thing that can inject the Salad-Api-Key).
+    """
+    if b.kind == "salad":
+        return f"http://127.0.0.1:{b.salad_proxy_port}"
+    return b.endpoint
 
 
 @dataclass
@@ -263,6 +284,11 @@ def load_config(path: str | Path | None = None) -> Config:
             concurrency=b.get("concurrency", 1),
             resource_group=b.get("resource_group", ""),
             ctx_override=b.get("ctx_override", 0), notes=b.get("notes", ""),
+            kind=b.get("kind", "local"),
+            salad_keyfile=b.get("salad_keyfile", ""),
+            salad_proxy_port=int(b.get("salad_proxy_port", 0) or 0),
+            salad_thinking=bool(b.get("salad_thinking", False)),
+            salad_heartbeat=bool(b.get("salad_heartbeat", True)),
         )
 
     backends = [_backend(b) for b in raw.get("backends", [])]
@@ -304,6 +330,9 @@ def load_config(path: str | Path | None = None) -> Config:
 
     cfg = Config(paths=paths, daemon=daemon, worker=worker, mycelium=mycelium,
                  backends=backends, groups=groups, profiles=profiles, projects=projects)
+    # Where this config was read from: the daemon's single-writer config
+    # edits (salad backend add/remove) rewrite this exact file.
+    cfg.config_path = str(path)
     _validate(cfg)
     return cfg
 
@@ -316,6 +345,16 @@ def _validate(cfg: Config) -> None:
             raise ValueError(f"backend {b.id}: unknown resource_group {b.resource_group!r}")
         if b.concurrency < 1:
             raise ValueError(f"backend {b.id}: concurrency must be >= 1")
+        if b.kind not in ("local", "salad"):
+            raise ValueError(f"backend {b.id}: unknown kind {b.kind!r} "
+                             f"(local | salad)")
+        if b.kind == "salad":
+            if not b.salad_proxy_port:
+                raise ValueError(f"salad backend {b.id}: salad_proxy_port is "
+                                 f"required (the daemon's local proxy port; "
+                                 f"`ladd backend add-salad` assigns one)")
+            if b.is_primary:
+                raise ValueError(f"salad backend {b.id}: cannot be primary")
     for p in cfg.profiles:
         if p.adapter not in ("claude", "cline"):
             raise ValueError(f"profile {p.id}: unknown adapter {p.adapter!r}")

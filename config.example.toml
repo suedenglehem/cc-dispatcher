@@ -117,6 +117,23 @@ enabled = true
 resource_group = "tr4"
 notes = "LINUX boot of the dual-boot box"
 
+# A SaladCloud group (https://<group>.salad.cloud). In practice you don't
+# hand-edit this — `ladd -a https://<group>.salad.cloud` appends the block
+# (and the id to every claude profile's backend_ids) and starts the local
+# proxy; `ladd -d <url>` removes both. Shown for shape reference only:
+# [[backends]]
+# id = "tamarind"                          # default: first host dot-label
+# endpoint = "https://tamarind-x.salad.cloud"
+# model_id = "qwen"                         # served alias the proxy rewrites to
+# model_label = "qwen"
+# kind = "salad"
+# salad_keyfile = "/usr/local/bin/salad_api.txt"
+# salad_proxy_port = 18100                  # first free 18100-18199
+# salad_thinking = false
+# salad_heartbeat = true                    # 1-token/30s keepalive while a worker runs
+# enabled = true
+# notes = "Salad group; start/stop the group yourself"
+
 [[profiles]]
 id = "cc-worker"
 adapter = "claude"

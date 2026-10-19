@@ -100,7 +100,7 @@ which encodes the verified TR4 topology). Sections:
 | `[worker]` | deadline/attempt defaults, `claude_executable` / `cline_executable` (default `ccline`), tool allowlist, env derivation (90% of probed context, output tokens, autocompact pct), `anthropic_api_key = "local"`, `permission_mode = "bypassPermissions"` |
 | `[mycelium]` | **optional** — the daemon spawns a `mycelium serve` child only if this section is present; absent ⇒ memory injection off |
 | `[[resource_groups]]` | total-concurrency caps across member backends |
-| `[[backends]]` | `endpoint`, `model_id` (served id), `model_label` (the `--model` label), `is_primary`, `enabled`, `manually_reserved`, `concurrency`, `resource_group` |
+| `[[backends]]` | `endpoint`, `model_id` (served id), `model_label` (the `--model` label), `is_primary`, `enabled`, `manually_reserved`, `concurrency`, `resource_group`; salad backends add `kind = "salad"`, `salad_proxy_port`, `salad_keyfile`, … (managed by `ladd -a`, see below) |
 | `[[profiles]]` | per-profile adapter, extra args, `backend_ids`, deadlines, limits |
 | `[[projects]]` | `repo_path`, `integration_ref` (default `main`), `mycelium_project` — or add at runtime with `ladd project add` |
 
@@ -114,6 +114,15 @@ Release a backend for work only when its interactive client is closed:
 ladd backend release tr4-secondary      # when Cline is closed
 ladd backend reserve tr4-secondary --note "Cline interactive session"   # after
 ```
+
+**SaladCloud groups** are first-class backends: `ladd -a
+https://<group>.salad.cloud` registers a running (or even currently
+stopped) group — a local Anthropic→OpenAI proxy is started for it, workers
+point at the proxy, and the group's `Salad-Api-Key` is injected per
+request. `ladd -d <url>` removes it. You manage the group lifecycle
+yourself; a stopped group simply shows `offline` until you start it again.
+Full options: `ladd backend add-salad` / `remove-salad`; details in
+`docs/commands.md`.
 
 ## Run
 

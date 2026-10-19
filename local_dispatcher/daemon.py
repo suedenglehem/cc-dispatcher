@@ -22,6 +22,7 @@ from .config import load_config
 from .db import Database, now_iso
 from .jobs import Jobs
 from .mycelium import MyceliumClient
+from .salad import SaladProxyManager
 from .scheduler import Scheduler
 from .supervisor import Supervisor
 
@@ -81,7 +82,8 @@ async def serve(cfg) -> None:
     lock_fd = acquire_lock(cfg.paths.lock_path)
     db = Database(cfg.paths.db_path)
     db.migrate()
-    backends = BackendRegistry(cfg, db)
+    salad = SaladProxyManager(cfg, cfg.paths)
+    backends = BackendRegistry(cfg, db, salad)
     backends.sync()
     sync_projects_from_config(cfg, db)
 
@@ -105,11 +107,22 @@ async def serve(cfg) -> None:
             signal.signal(sig, signal.SIG_DFL)
 
     await scheduler.startup_reconcile()
-    api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends, mycelium)
+    api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends, mycelium,
+                    salad=salad)
     await api.start()
     await scheduler.start()
     log.info("dispatcherd ready (pid %d, socket %s)", os.getpid(),
              cfg.paths.socket_path)
+
+    # Salad proxies come up at startup (orphan adoption by nonce covers
+    # proxies from a crashed generation). A dead group is fine: the probe
+    # just marks the backend offline.
+    for b in cfg.backends:
+        if b.kind == "salad":
+            up, detail = await salad.ensure(b)
+            if not up:
+                log.warning("salad proxy for %s not up at startup: %s",
+                            b.id, detail)
 
     # Initial probe of worker backends so the first status is not stale.
     for b in cfg.backends:
@@ -120,7 +133,8 @@ async def serve(cfg) -> None:
                 log.exception("initial probe of %s failed", b.id)
 
     await stop
-    log.info("stopping (workers left running; they are re-adopted on restart)")
+    log.info("stopping (workers and salad proxies left running; both are "
+             "re-adopted on restart)")
     await scheduler.stop()
     await api.stop()
     if mycelium is not None:

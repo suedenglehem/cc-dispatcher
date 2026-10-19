@@ -4,6 +4,7 @@ API response guarantees (credential redaction + 8k cap)."""
 import json
 import os
 import subprocess
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -30,7 +31,12 @@ def test_migrations_idempotent(tmp_path):
     d = Database(tmp_path / "t.db")
     v1 = d.migrate()
     v2 = d.migrate()
-    assert v1 == v2 == 1
+    assert v1 == v2
+    # version tracks the numbered migration files, so adding 0003_*.sql
+    # updates the schema without this test changing
+    n = len(list((Path(__file__).resolve().parent.parent
+                  / "local_dispatcher" / "migrations").glob("*.sql")))
+    assert v1 == n
     tables = {r["name"] for r in d.query(
         "SELECT name FROM sqlite_master WHERE type='table'")}
     for t in ("projects", "backends", "resource_groups", "worker_profiles",

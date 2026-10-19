@@ -32,6 +32,7 @@ from local_dispatcher.daemon import sync_projects_from_config, worker_policy_tex
 from local_dispatcher.db import Database
 from local_dispatcher.jobs import Jobs
 from local_dispatcher.mycelium import MyceliumClient
+from local_dispatcher.salad import SaladProxyManager
 from local_dispatcher.scheduler import Scheduler
 from local_dispatcher.supervisor import Supervisor
 
@@ -119,6 +120,11 @@ class DaemonHandle:
         """The daemon's MyceliumClient (None when [mycelium] is absent)."""
         return self.state.get("mycelium")
 
+    @property
+    def salad(self):
+        """The daemon's SaladProxyManager (always present, may own 0 proxies)."""
+        return self.state.get("salad")
+
     def client(self) -> ApiClient:
         return ApiClient(self.cfg.paths.socket_path)
 
@@ -147,6 +153,11 @@ class DaemonHandle:
             raise RuntimeError("daemon thread did not stop in 20s")
         if self.errors:
             raise RuntimeError(f"daemon thread failed: {self.errors[0]}")
+        # Tests always tear salad proxies down (the production daemon
+        # leaves them for orphan adoption; here they would leak).
+        salad = self.state.get("salad")
+        if salad is not None:
+            salad.stop_all()
 
 
 def _daemon_body(cfg, state: dict, stop_event: threading.Event,
@@ -155,7 +166,8 @@ def _daemon_body(cfg, state: dict, stop_event: threading.Event,
         cfg.paths.ensure()
         db = Database(cfg.paths.db_path)
         db.migrate()
-        backends = BackendRegistry(cfg, db)
+        salad = SaladProxyManager(cfg, cfg.paths)
+        backends = BackendRegistry(cfg, db, salad)
         backends.sync()
         sync_projects_from_config(cfg, db)
         jobs = Jobs(db, cfg, cfg.paths, worker_policy_text())
@@ -167,9 +179,10 @@ def _daemon_body(cfg, state: dict, stop_event: threading.Event,
         scheduler = Scheduler(db, cfg, cfg.paths, backends, supervisor, jobs,
                               mycelium)
         state.update(db=db, backends=backends, jobs=jobs, supervisor=supervisor,
-                     scheduler=scheduler, mycelium=mycelium)
+                     scheduler=scheduler, mycelium=mycelium, salad=salad)
         await scheduler.startup_reconcile()
-        api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends, mycelium)
+        api = ApiServer(db, cfg, cfg.paths, jobs, scheduler, backends, mycelium,
+                        salad=salad)
         await api.start()
         state.update(api=api)
         await scheduler.start()

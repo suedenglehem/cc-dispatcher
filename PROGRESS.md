@@ -17,15 +17,21 @@
 | P2 | MCP adapter (8 tools) + primary UX; live primary↔worker demo | ✅ done (`b3a1ef6`) |
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, **Cline PASS** (root-caused → `ccline` fix → real pass `j_bba5405826`), group cap proven live |
+| P5 | SaladCloud backends: `ladd -a/-d URL`, local Anthropic→OpenAI proxy, keyed probes, heartbeat | ✅ done (2026-10-19): 123/123 tests; live register-while-stopped verified (503 path); live online worker smoke pending group boot |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
   adopt, no duplicate, capacity reconciled, flock negative control); a14/a15/a16 with a REAL
   `mycelium serve` subprocess under `MYCELIUM_CONFIG` → temp store (user store untouched)
 - Non-acceptance P3: `test_i_context_warning.py` (2) + `test_i_crash_recovery.py` (4), green
-- Suite: **104 passed, 0 skipped** (~95s) — 6 added with the P4-live bug fixes
-  (FK tombstone `test_i_backend_rename.py` ×2, `memory_references` numeric-id contract
-  `test_u_results.py` ×4) + 2 for the ccline wrapper (`test_i_cline_adapter.py`)
+- Suite: **123 passed, 0 skipped** (~108s, 2026-10-19) — the 19 added with P5 are the salad
+  feature: `tests/test_u_salad.py` (6 unit: gateway parsing, nonce, config-append/remove
+  splice + idempotence, profile-list rewrite, port allocation, keyfile) +
+  `tests/test_i_salad.py` (9 integration: add-while-stopped, online/stop/start flips via
+  real ticks, key-rejected 403, error paths, a real worker job on a salad backend,
+  30s heartbeat on the real tick path, remove + tombstone, orphan-proxy adoption,
+  `ladd -a/-d` CLI shorthand). Earlier: 6 with the P4-live bug fixes
+  (`test_i_backend_rename.py` ×2, `test_u_results.py` ×4) + 2 for the ccline wrapper
 
 ## P3 (recovery / restart / memory / failure injection) — COMPLETE
 Goal: all 20 acceptance tests green, using real subprocesses.
@@ -205,9 +211,72 @@ command walkthrough — start/refresh → team submit → watch → integrate �
 finish → using the dispatcher in a different project (`ladd project add`
 runtime registration, e.g. vast; MCP tools auto-bind by cwd), plus
 troubleshooting one-liners; every command checked against the live CLI flag
-order. Uncommitted (untracked). Next unfinished task: none —
-the project is in a clean closed state (suite 108/108, 20/20 acceptance,
-both live smokes passed and recorded, backends re-secured, repo pushed).
+order. Committed + pushed as `4fabd0b`, then section 6 restructured and
+pushed again as `437e92f` (one-time `ladd project add`, THEN just fire claude
+code in that folder — dispatch_* MCP tools bind from cwd; the terminal ladd
+loop demoted to "only if you are NOT inside a Claude Code session").
+**vast wired end-to-end (2026-10-18):** `/dd2/andrei/docker/vast` had never
+been a git repo — that was the `project_path_invalid` cause. Fixed:
+`git init -b main` + `.gitignore` (.venv/, reference/, .resume) + initial
+commit `69ccac4` (36 files); GitHub remote origin =
+git@github.com:suedenglehem/d-vast.git pushed (`main`, tracking set, clean
+first push to an empty repo); registered as a dispatcher project via
+`ladd project add vast /dd2/andrei/docker/vast --integration-ref main`
+(runtime add, no daemon restart; `ladd project list`: mode=single). A stale
+non-repo copy at `/dd2/andrei/vast` (old stub) was left untouched. Next
+unfinished task: none — clean closed state (no code changes since `283b632`,
+so the last recorded suite result 108/108 + 20/20 acceptance still stands;
+both live smokes passed and recorded, backends re-secured, repo pushed in
+sync with GitHub). First real vast delegation awaits the user.
+
+## P5 (SaladCloud backends) — COMPLETE (code + tests 2026-10-19)
+Status: **code done, test-green (123/123), live verification in progress.** Workers can run
+on llama.cpp models served by a salad.cloud group through a local Anthropic→OpenAI proxy.
+The user starts/stops the groups themselves; the dispatcher only registers the URL, keeps
+the proxy alive, probes with the key, and schedules on it when online.
+
+1. `ladd -a https://<group>.salad.cloud` / `ladd -d <url>` — top-level shorthand (id =
+   first dot-label of the host; `-d` matches by normalized-gateway comparison). Full options
+   via `ladd backend add-salad URL [--id --port --keyfile --model --thinking --concurrency
+   --group --notes]` / `ladd backend remove-salad <id>`; same API methods
+   (`backend_add_salad` / `backend_remove_salad`).
+2. `salad_proxy.py` (vendored, stdlib-only): local 127.0.0.1 proxy, Anthropic API in /
+   OpenAI out; rewrites every upstream request to the served alias (`--model`); injects
+   `Salad-Api-Key` from the keyfile (default `/usr/local/bin/salad_api.txt`, never echoed);
+   `/v1/models` echo, `/healthz` with a nonce, `/__upstream/<path>` keyed passthrough
+   (ctx via `/props`). `--allow-http-upstream` is test-only, loopback hosts only.
+3. `salad.py` manager: nonce `dispatcherd-<id>-<port>-<md5(endpoint)[:8]>` — stable across
+   daemon restarts, so proxies are **re-adopted, never duplicated** (and survive a daemon
+   restart by design, like workers under decision #8). Atomic config rewrite
+   (tmp + validate + os.replace) then in-memory splice; the id is appended to every
+   **claude-adapter** profile's `backend_ids` (cline profiles untouched). Removal stops the
+   proxy, strips the block + profile entries, and tombstones the DB row when jobs reference
+   it; a backend with an active job cannot be removed.
+4. Scheduling: salad backends are first-class — probe = `ensure()` (proxy up) → keyed
+   GET `/v1/models` (200/403/503) → ctx via `/__upstream/props` × 90%. A **stopped group is
+   a normal `offline` state, not an error**: `ladd -a` on a 503 gateway registers fine and
+   flips online on the next probe after the group starts. Worker env
+   `ANTHROPIC_BASE_URL` = the local proxy, so `claude` runs with its Anthropic API shape
+   unchanged.
+5. Heartbeat: while a job has an active reservation on a salad backend, the daemon sends a
+   1-token completion every 30s (`salad_heartbeat = false` opts out) — keeps
+   `IDLE_SHUTDOWN=heartbeat` groups alive across long Bash gaps between LLM calls.
+6. Bugs found & fixed while testing (all covered by the new tests):
+   - `sync()` never pruned backends absent from config when the config had **zero** backends
+     (invalid `NOT IN ()` SQL guarded behind `if ids:`) → removed backends stayed
+     `enabled=1` in the DB; restructured so the prune loop runs in both branches. This
+     regression-adjacent fix also repaired a latent bug in HEAD's non-empty path;
+     `tests/test_i_backend_rename.py` (2) guards it.
+   - `_TABLE_HDR` regex excluded `[[array-of-tables]]` headers → TOML appends never saw the
+     profiles/backends tables.
+   - Vendored proxy hard-rejected http upstreams → test-only loopback flag.
+7. Live verification (2026-10-19): daemon restarted onto new code; `ladd -a
+   https://tamarind-caraway-1rpqcqcnbbkmqdbv.salad.cloud` succeeded while the group was
+   stopped — `proxy 127.0.0.1:18100, health offline — currently offline: HTTP 503`
+   (exactly the designed path). After the user started the group, the online flip + a real
+   worker job on the salad backend are the remaining live steps (pending at commit time).
+
+Next unfinished task: finish the live online smoke (see HANDOFF.md).
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
@@ -222,7 +291,7 @@ both live smokes passed and recorded, backends re-secured, repo pushed).
 - **Worker-death 143 (external SIGTERM): SUSPENDED** — not reproducible on the current daemon;
   dispatcher / systemd-oomd / kernel OOM / Cline all exonerated with evidence. See HANDOFF.md + mycelium memory #195.
 
-## Live environment (as of 2026-10-17)
+## Live environment (as of 2026-10-19)
 - tr4-primary `:8091` (vLLM, qwen3.8-27b-fp8) = the primary coordinating session, never worker-scheduled.
 - tr4-secondary `:8080` (strata, `swift-1.5-iq3_xxs`) = RESERVED for the Cline interactive session.
 - **Dual-boot box** (topology user-corrected 2026-10-17; the "renamed i7→ak,
@@ -237,3 +306,10 @@ both live smokes passed and recorded, backends re-secured, repo pushed).
   (`ladd backend release tr4-secondary`) only while that session is off it,
   and re-reserve after any demo. Config is the source of truth and re-asserts
   these states on every daemon start.
+- **SaladCloud**: `tamarind-caraway-1rpqcqcnbbkmqdbv` (qwen, model label
+  `qwen`) registered live via `ladd -a` 2026-10-19 while the group was
+  stopped (503 → `offline`, proxy on 127.0.0.1:18100). The user manages
+  group start/stop; the 30s probes follow the gateway. As of the last
+  check the gateway still answered 503 (group not actually serving yet) —
+  online worker smoke pending; flips `available` automatically on the next
+  probe once it serves 200.

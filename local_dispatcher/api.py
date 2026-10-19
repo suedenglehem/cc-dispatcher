@@ -15,15 +15,24 @@ import asyncio
 import json
 import logging
 import os
+import re
 import socket
+import tempfile
+from pathlib import Path
 
 from pydantic import ValidationError
 
+from .config import DEFAULT_CONFIG_PATH, BackendConfig, load_config
 from .db import Database, now_iso
-from .models import (ApiError, BackendSetParams, CancelParams, ErrorCodes,
+from .models import (ApiError, BackendAddSaladParams, BackendRemoveSaladParams,
+                     BackendSetParams, CancelParams, ErrorCodes,
                      IntegrateParams, JobRefParams, ProjectAddParams,
                      PromoteParams, ResumeParams, SetModeParams, SubmitParams,
                      WorkersParams)
+from .salad import (SALAD_KEYFILE_DEFAULT, SALAD_PROXY_PORT_BASE,
+                    SALAD_PROXY_PORT_SPAN, allocate_salad_port,
+                    append_salad_backend, append_to_profile_backend_lists,
+                    normalize_gateway, read_salad_key, remove_salad_backend)
 
 log = logging.getLogger("dispatcherd.api")
 
@@ -53,7 +62,7 @@ def _resolve_project(conn, project_id: str | None) -> dict:
 
 class ApiServer:
     def __init__(self, db: Database, cfg, paths, jobs, scheduler, backends,
-                 mycelium=None):
+                 mycelium=None, salad=None):
         self.db = db
         self.cfg = cfg
         self.paths = paths
@@ -61,6 +70,10 @@ class ApiServer:
         self.scheduler = scheduler
         self.backends = backends
         self.mycelium = mycelium
+        self.salad = salad
+        # The daemon is the single writer of config.toml; runtime salad
+        # add/remove rewrites this exact file.
+        self.config_path = getattr(cfg, "config_path", None) or DEFAULT_CONFIG_PATH
         self._server: asyncio.base_events.UnixServer | None = None
 
     async def start(self) -> None:
@@ -143,6 +156,8 @@ class ApiServer:
             "reconcile": self._m_reconcile,
             "backend_list": self._m_backend_list,
             "backend_set": self._m_backend_set,
+            "backend_add_salad": self._m_backend_add_salad,
+            "backend_remove_salad": self._m_backend_remove_salad,
             "project_list": self._m_project_list,
             "project_add": self._m_project_add,
             "events": self._m_events,
@@ -359,6 +374,163 @@ class ApiServer:
         return {"backend": dict(self.db.query_one(
             "SELECT * FROM backends WHERE id=?", (params.backend_id,)))}
 
+    # -- salad backends (runtime config edits) ----------------------------------
+    def _commit_config(self, text: str) -> None:
+        """Write config.toml atomically: tmp file, full re-validation, then
+        os.replace. On validation failure nothing is changed."""
+        path = self.config_path
+        d = os.path.dirname(path)
+        os.makedirs(d, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(prefix=".config-", suffix=".toml", dir=d)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+            load_config(tmp)      # raise BEFORE touching the live file
+        except Exception as e:
+            os.unlink(tmp)
+            raise ApiError(ErrorCodes.SALAD_CONFIG_INVALID,
+                           f"refusing to install config (nothing was "
+                           f"changed): {e}")
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except FileNotFoundError:
+            mode = 0o600
+        os.chmod(tmp, mode)
+        os.replace(tmp, path)
+
+    def _reload_config(self) -> None:
+        """Re-read config from disk and splice the live lists in place:
+        every component (scheduler, supervisor, api, salad manager) shares
+        this one Config instance."""
+        new = load_config(self.config_path)
+        self.cfg.backends[:] = new.backends
+        self.cfg.groups[:] = new.groups
+        self.cfg.profiles[:] = new.profiles
+        self.cfg.projects[:] = new.projects
+
+    async def _m_backend_add_salad(self, p: dict) -> dict:
+        params = BackendAddSaladParams(**p)
+        try:
+            gw = normalize_gateway(params.url)
+        except ValueError as e:
+            raise ApiError(ErrorCodes.SALAD_URL_INVALID, str(e))
+        host = gw.split("://", 1)[1].split(":", 1)[0]
+        sid = params.id or host.split(".", 1)[0]
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", sid):
+            raise ApiError(ErrorCodes.SALAD_URL_INVALID,
+                           f"derived backend id {sid!r} is invalid; pass an "
+                           "explicit id (--id / id=)")
+        if self.cfg.backend(sid) is not None:
+            raise ApiError(ErrorCodes.SALAD_ID_EXISTS,
+                           f"backend {sid!r} already exists",
+                           endpoint=self.cfg.backend(sid).endpoint)
+        keyfile = params.keyfile or SALAD_KEYFILE_DEFAULT
+        if not read_salad_key(keyfile):
+            raise ApiError(ErrorCodes.SALAD_KEYFILE_MISSING,
+                           f"cannot read a Salad API key from {keyfile}; "
+                           "write the key there or pass a different path "
+                           "(--keyfile / keyfile=)")
+        if params.port is not None:
+            port = params.port
+            for other in self.cfg.backends:
+                if (other.kind == "salad" and other.id != sid
+                        and other.salad_proxy_port == port):
+                    raise ApiError(ErrorCodes.SALAD_PORT_IN_USE,
+                                   f"port {port} is already used by salad "
+                                   f"backend {other.id!r}")
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            try:
+                s.bind(("127.0.0.1", port))
+            except OSError:
+                raise ApiError(ErrorCodes.SALAD_PORT_IN_USE,
+                               f"port {port} is bound by another local "
+                               "process")
+            finally:
+                s.close()
+        else:
+            port = allocate_salad_port(self.cfg)
+            if port is None:
+                raise ApiError(ErrorCodes.SALAD_PORT_EXHAUSTED,
+                               "no free port in the salad proxy range "
+                               f"{SALAD_PROXY_PORT_BASE}-"
+                               f"{SALAD_PROXY_PORT_BASE + SALAD_PROXY_PORT_SPAN - 1}; "
+                               "pass an explicit port (--port / port=)")
+        if params.resource_group and not any(
+                g.id == params.resource_group for g in self.cfg.groups):
+            raise ApiError(ErrorCodes.SALAD_CONFIG_INVALID,
+                           f"unknown resource_group {params.resource_group!r}",
+                           groups=[g.id for g in self.cfg.groups])
+        b = BackendConfig(id=sid, endpoint=gw, model_id=params.model,
+                          model_label=params.model, kind="salad",
+                          salad_keyfile=keyfile, salad_proxy_port=port,
+                          salad_thinking=params.thinking,
+                          concurrency=params.concurrency,
+                          resource_group=params.resource_group,
+                          notes=params.notes)
+        text = ""
+        if os.path.exists(self.config_path):
+            text = Path(self.config_path).read_text(encoding="utf-8")
+        new_text = append_to_profile_backend_lists(
+            append_salad_backend(text, b), sid, adapters={"claude"})
+        self._commit_config(new_text)
+        self._reload_config()
+        self.backends.sync()
+        # Bringing the proxy up is best-effort here: a group the user hasn't
+        # started yet is a normal offline state, not an error. Every probe
+        # re-calls ensure(), so the proxy self-heals when the group comes up.
+        up, detail = (await self.salad.ensure(self.cfg.backend(sid))
+                      if self.salad is not None
+                      else (False, "daemon has no salad proxy manager"))
+        res = await self.backends.probe(sid, force=True)
+        self.db.event("backend", sid, "salad_backend_added",
+                      {"endpoint": gw, "proxy_port": port,
+                       "model": params.model, "proxy_up": up,
+                       "health": res.health})
+        row = dict(self.db.query_one("SELECT * FROM backends WHERE id=?",
+                                     (sid,)))
+        return {
+            "backend": row,
+            "proxy": f"127.0.0.1:{port}",
+            "proxy_up": up,
+            "proxy_detail": detail,
+            "health": res.health,
+            "key_rejected": res.error == "HTTP 403",
+            "offline_detail": "" if res.health == "online" else res.error,
+        }
+
+    async def _m_backend_remove_salad(self, p: dict) -> dict:
+        params = BackendRemoveSaladParams(**p)
+        b = self.cfg.backend(params.backend_id)
+        if b is None or b.kind != "salad":
+            raise ApiError(ErrorCodes.SALAD_NOT_FOUND,
+                           f"{params.backend_id!r} is not a registered salad "
+                           "backend",
+                           salad_backends=[x.id for x in self.cfg.backends
+                                           if x.kind == "salad"])
+        busy = (self.backends.active_reservations(b.id)
+                + self.backends.quarantined_reservations(b.id))
+        if busy:
+            raise ApiError(ErrorCodes.SALAD_BACKEND_BUSY,
+                           f"backend {b.id} still has {busy} running or "
+                           "quarantined worker reservation(s); cancel its "
+                           "jobs first (ladd job cancel), then remove again")
+        if self.salad is not None:
+            self.salad.stop(b.id)
+        text = ""
+        if os.path.exists(self.config_path):
+            text = Path(self.config_path).read_text(encoding="utf-8")
+        try:
+            new_text = remove_salad_backend(text, b.id)
+        except ValueError as e:
+            raise ApiError(ErrorCodes.SALAD_REMOVE_FAILED, str(e))
+        self._commit_config(new_text)
+        self._reload_config()
+        self.backends.sync()   # tombstones the row: history stays resolvable
+        self.db.event("backend", b.id, "salad_backend_removed",
+                      {"endpoint": b.endpoint})
+        row = self.db.query_one("SELECT * FROM backends WHERE id=?", (b.id,))
+        return {"backend": dict(row) if row else None, "removed": True}
+
     async def _m_project_list(self, p: dict) -> dict:
         rows = [dict(r) for r in self.db.query("SELECT * FROM projects ORDER BY id")]
         return {"projects": rows}
@@ -526,6 +698,19 @@ class ApiClient:
                     reserved: bool | None = None, note: str = "") -> dict:
         return self.call("backend_set", backend_id=backend_id, enabled=enabled,
                          reserved=reserved, note=note)
+
+    def backend_add_salad(self, url: str, id: str | None = None,
+                          port: int | None = None, keyfile: str = "",
+                          model: str = "qwen", thinking: bool = False,
+                          concurrency: int = 1, resource_group: str = "",
+                          notes: str = "") -> dict:
+        return self.call("backend_add_salad", url=url, id=id, port=port,
+                         keyfile=keyfile, model=model, thinking=thinking,
+                         concurrency=concurrency, resource_group=resource_group,
+                         notes=notes)
+
+    def backend_remove_salad(self, backend_id: str) -> dict:
+        return self.call("backend_remove_salad", backend_id=backend_id)
 
     def project_list(self) -> dict:
         return self.call("project_list")

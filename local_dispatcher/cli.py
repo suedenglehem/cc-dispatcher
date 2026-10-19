@@ -13,7 +13,8 @@ import sys
 
 from .api import ApiClient
 from .config import DEFAULT_CONFIG_PATH, Paths, load_config
-from .models import ApiError
+from .models import ApiError, ErrorCodes
+from .salad import SALAD_KEYFILE_DEFAULT, find_salad_backend
 
 
 def _client(args) -> ApiClient:
@@ -176,6 +177,59 @@ def c_backend_set(args) -> int:
     return 0
 
 
+def c_backend_add_salad(args) -> int:
+    r = _client(args).backend_add_salad(
+        args.url, id=args.id, port=args.port, keyfile=args.keyfile,
+        model=args.model, thinking=args.thinking, concurrency=args.concurrency,
+        resource_group=args.group, notes=args.notes)
+    _out(args, r)
+    return 0
+
+
+def c_backend_remove_salad(args) -> int:
+    _out(args, _client(args).backend_remove_salad(args.backend_id))
+    return 0
+
+
+def c_salad_shorthand(args) -> int:
+    """`ladd -a URL` / `ladd -d URL` — the primary salad UX."""
+    c = _client(args)
+    if args.add_salad:
+        r = c.backend_add_salad(args.add_salad)
+        if args.json:
+            _out(args, r)
+        else:
+            note = ""
+            if r.get("key_rejected"):
+                note = (" — gateway reachable but REJECTED the Salad key "
+                        "(check the keyfile)")
+            elif r["health"] != "online":
+                d = r.get("offline_detail")
+                note = f" — currently {r['health']}" + (f": {d}" if d else "")
+            print(f"added salad backend {r['backend']['id']}: proxy "
+                  f"{r['proxy']}, health {r['health']}{note}")
+            if not r.get("proxy_up"):
+                print(f"  proxy not up: {r.get('proxy_detail')}")
+        return 0
+    rows = c.backend_list()["backends"]
+    try:
+        row = find_salad_backend(rows, args.delete_salad)
+    except ValueError as e:
+        raise ApiError(ErrorCodes.SALAD_URL_INVALID, str(e))
+    if row is None:
+        known = [b["id"] for b in rows if b.get("kind") == "salad"]
+        raise ApiError(ErrorCodes.SALAD_NOT_FOUND,
+                       f"no registered salad backend matches "
+                       f"{args.delete_salad!r}",
+                       salad_backends=known)
+    c.backend_remove_salad(row["id"])
+    if args.json:
+        _out(args, {"removed": row["id"], "endpoint": row.get("endpoint")})
+    else:
+        print(f"removed salad backend {row['id']} ({row.get('endpoint')})")
+    return 0
+
+
 def c_backend_check(args) -> int:
     """Force a probe, then show that backend's row + worker state."""
     c = _client(args)
@@ -218,7 +272,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--socket", default=None,
                     help="override the daemon socket path")
     ap.add_argument("--json", action="store_true", help="raw JSON output")
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    ap.add_argument("-a", "--add-salad", metavar="URL", default=None,
+                    help="register a salad.cloud gateway (ladd -a "
+                         "https://<group>.salad.cloud); id derived from the "
+                         "group host, proxy port auto-assigned")
+    ap.add_argument("-d", "--delete-salad", metavar="URL", default=None,
+                    help="unregister a salad backend by its gateway URL")
+    # `cmd` is no longer required at the argparse level: `ladd -a URL` is a
+    # valid command without a subcommand; main() enforces one-or-the-other.
+    sub = ap.add_subparsers(dest="cmd")
 
     p = sub.add_parser("status", help="projects, jobs, workers, reservations")
     p.add_argument("--all-jobs", action="store_true",
@@ -300,6 +362,27 @@ def build_parser() -> argparse.ArgumentParser:
     b = bsub.add_parser("check", help="force probe and show backend row")
     b.add_argument("backend_id")
     b.set_defaults(fn=c_backend_check)
+    b = bsub.add_parser("add-salad",
+                        help="register a salad.cloud gateway (full options; "
+                             "shorthand: ladd -a URL)")
+    b.add_argument("url")
+    b.add_argument("--id", default=None,
+                   help="backend id (default: first dot-label of the host)")
+    b.add_argument("--port", type=int, default=None,
+                   help="local proxy port (default: first free 18100-18199)")
+    b.add_argument("--keyfile", default="",
+                   help=f"Salad API key file (default: {SALAD_KEYFILE_DEFAULT})")
+    b.add_argument("--model", default="qwen",
+                   help="served model alias the proxy rewrites requests to")
+    b.add_argument("--thinking", action="store_true",
+                   help="request reasoning effort upstream")
+    b.add_argument("--concurrency", type=int, default=1)
+    b.add_argument("--group", default="", help="resource group id")
+    b.add_argument("--notes", default="")
+    b.set_defaults(fn=c_backend_add_salad)
+    b = bsub.add_parser("remove-salad", help="unregister a salad backend")
+    b.add_argument("backend_id")
+    b.set_defaults(fn=c_backend_remove_salad)
 
     p = sub.add_parser("project", help="project management")
     psub = p.add_subparsers(dest="pcmd", required=True)
@@ -322,8 +405,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args, extras = parser.parse_known_args(argv)
     try:
+        if args.add_salad or args.delete_salad:
+            if extras:
+                parser.error(f"unexpected extra arguments: {extras}")
+            return c_salad_shorthand(args)
+        if args.cmd is None:
+            parser.error("a subcommand is required (or -a URL / -d URL)")
+        # strict re-parse so subcommands still reject unrecognized arguments
+        args = parser.parse_args(argv)
         return args.fn(args)
     except ApiError as e:
         print(f"error: {e.code}: {e.message}", file=sys.stderr)

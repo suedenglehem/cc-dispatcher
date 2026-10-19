@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 
+from ..config import worker_endpoint
 from ..models import FailureClass
 from .base import StreamInfo, WorkerAdapter, WorkerLaunch, worker_base_env
 
@@ -57,7 +58,9 @@ class ClaudeAdapter(WorkerAdapter):
             cmd.append(packet)
 
         env = worker_base_env()
-        env["ANTHROPIC_BASE_URL"] = backend_cfg.endpoint
+        # Local backends: the endpoint itself. Salad backends: the daemon's
+        # local proxy (the only thing that can inject the Salad-Api-Key).
+        env["ANTHROPIC_BASE_URL"] = worker_endpoint(backend_cfg)
         env["ANTHROPIC_API_KEY"] = backend_cfg.credential_env.get(
             "ANTHROPIC_API_KEY", w.anthropic_api_key)
         env.update({

@@ -126,3 +126,66 @@ Mid-job behavior:
 - **You start a backend a queued job is waiting on** — the job sits at
   `status_detail = backend_offline` until a probe flips the backend online;
   `ladd workers --refresh` skips the wait.
+
+## Salad backends (salad.cloud groups)
+
+Workers can run on LLMs served by a SaladCloud group. You start/stop the
+groups yourself; the dispatcher only registers the gateway URL, keeps a
+local proxy alive, probes it, and schedules jobs on it when it is online.
+
+```sh
+ladd -a https://<group>.salad.cloud     # register (id = first host label)
+ladd -d https://<group>.salad.cloud     # unregister (matched by gateway URL)
+ladd workers --refresh                  # see its health / ctx
+```
+
+Full options (same API, explicit id/port/model/…):
+
+```sh
+ladd backend add-salad https://<group>.salad.cloud \
+    [--id mygroup] [--port 18110] [--keyfile /usr/local/bin/salad_api.txt] \
+    [--model qwen] [--thinking] [--concurrency 1] [--group tr4] [--notes "..."]
+ladd backend remove-salad <id>
+```
+
+What happens on add:
+
+- The backend block is appended to `config.toml` (atomic rewrite, validated
+  before install) and the id is added to every **claude-adapter** profile's
+  `backend_ids` — so jobs can pick it up immediately.
+- A local `salad_proxy.py` is started on `127.0.0.1:18100-18199`
+  (first free port) translating Anthropic→OpenAI and injecting the
+  `Salad-Api-Key` from the keyfile. Workers point at the proxy, never at
+  the gateway directly.
+- A probe runs at once. A **stopped group is not an error**: the Cloudflare
+  front answers 503, the backend is registered and `offline`, and it flips
+  `online` on the next probe after you start the group — no re-add needed.
+- If the gateway answers 403 the add still succeeds but reports
+  `key_rejected: true` — the registered Salad key is wrong; fix the keyfile,
+  then `ladd workers --refresh`.
+
+On remove: the proxy is stopped, the block and profile-list entries are
+removed from `config.toml`, and the DB row is deleted (kept as an inert
+tombstone if jobs reference it). A backend with an active job cannot be
+removed — cancel the jobs first.
+
+Operational notes:
+
+- Proxies survive daemon restarts (they are stateless and re-adopted by a
+  per-backend nonce, never duplicated). `ladd backend check <id>` force-probes
+  one backend; the proxy log is `<state>/run/salad_proxy_<id>.log`.
+- While a worker is actually running on a salad backend, the daemon sends a
+  1-token heartbeat every 30s to the group — so
+  `IDLE_SHUTDOWN=heartbeat` groups survive the long gaps between a worker's
+  LLM calls (e.g. during Bash). Real chat traffic already counts as
+  activity; the heartbeat is just the floor. Set
+  `salad_heartbeat = false` on the backend to opt out.
+- Context limit: the probed `n_ctx` × 90%, same convention as the local
+  backends.
+- Live verification (2026-10-19): `ladd -a` against a **stopped** group
+  registered cleanly — the gateway answered its 503 "group stopped" page and
+  the backend came up `offline` with its proxy running, exactly the designed
+  behavior for a dead URL. The online path (probe with ctx, and a real worker
+  job over the TLS chat upstream) is covered by the test suite against a fake
+  gateway; the live online smoke is pending the group actually booting
+  (gateway still answered 503 as of the last check).

@@ -16,6 +16,7 @@ import httpx
 
 from .config import BackendConfig, Config, derive_max_context
 from .db import Database, now_iso
+from .salad import SALAD_KEYFILE_DEFAULT, read_salad_key
 
 
 def extract_ctx_max(body: dict) -> int | None:
@@ -49,9 +50,10 @@ class ProbeResult:
 
 
 class BackendRegistry:
-    def __init__(self, cfg: Config, db: Database):
+    def __init__(self, cfg: Config, db: Database, salad=None):
         self.cfg = cfg
         self.db = db
+        self.salad = salad            # SaladProxyManager | None
         self._last_probe: dict[str, float] = {}
         self._last_result: dict[str, ProbeResult] = {}
 
@@ -70,8 +72,9 @@ class BackendRegistry:
                 conn.execute(
                     """INSERT INTO backends(id, endpoint, openai_base_url, model_id, model_label,
                        credential_env, enabled, is_primary, manually_reserved, reserved_note,
-                       concurrency, resource_group, notes)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       concurrency, resource_group, notes, kind, salad_keyfile,
+                       salad_proxy_port, salad_thinking, salad_heartbeat)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(id) DO UPDATE SET endpoint=excluded.endpoint,
                        openai_base_url=excluded.openai_base_url,
                        model_id=excluded.model_id, model_label=excluded.model_label,
@@ -79,10 +82,16 @@ class BackendRegistry:
                        manually_reserved=excluded.manually_reserved,
                        reserved_note=excluded.reserved_note,
                        concurrency=excluded.concurrency, resource_group=excluded.resource_group,
-                       notes=excluded.notes""",
+                       notes=excluded.notes, kind=excluded.kind,
+                       salad_keyfile=excluded.salad_keyfile,
+                       salad_proxy_port=excluded.salad_proxy_port,
+                       salad_thinking=excluded.salad_thinking,
+                       salad_heartbeat=excluded.salad_heartbeat""",
                     (b.id, b.endpoint, b.openai_base_url, b.model_id, b.model_label,
                      _json(b.credential_env), b.enabled, b.is_primary, b.manually_reserved,
-                     b.reserved_note, b.concurrency, b.resource_group or None, b.notes),
+                     b.reserved_note, b.concurrency, b.resource_group or None, b.notes,
+                     b.kind, b.salad_keyfile or None, b.salad_proxy_port or None,
+                     b.salad_thinking, b.salad_heartbeat),
                 )
             # Remove backends no longer in config. A config rename is a
             # remove + add, and historical rows (jobs/attempts) may still
@@ -95,21 +104,25 @@ class BackendRegistry:
                 removed = conn.execute(
                     f"SELECT id FROM backends WHERE id NOT IN ({placeholders})",
                     tuple(ids)).fetchall()
-                for (rid,) in removed:
-                    referenced = (
-                        conn.execute(
-                            "SELECT 1 FROM jobs WHERE backend_id = ? LIMIT 1",
-                            (rid,)).fetchone()
-                        or conn.execute(
-                            "SELECT 1 FROM attempts WHERE backend_id = ? LIMIT 1",
-                            (rid,)).fetchone())
-                    if referenced:
-                        conn.execute(
-                            "UPDATE backends SET enabled = 0, manually_reserved = 1, "
-                            "reserved_note = 'removed from config; tombstone for history' "
-                            "WHERE id = ?", (rid,))
-                    else:
-                        conn.execute("DELETE FROM backends WHERE id = ?", (rid,))
+            else:
+                # config with no backends: every DB row is stale
+                # (NOT IN () is invalid SQL, hence the branch)
+                removed = conn.execute("SELECT id FROM backends").fetchall()
+            for (rid,) in removed:
+                referenced = (
+                    conn.execute(
+                        "SELECT 1 FROM jobs WHERE backend_id = ? LIMIT 1",
+                        (rid,)).fetchone()
+                    or conn.execute(
+                        "SELECT 1 FROM attempts WHERE backend_id = ? LIMIT 1",
+                        (rid,)).fetchone())
+                if referenced:
+                    conn.execute(
+                        "UPDATE backends SET enabled = 0, manually_reserved = 1, "
+                        "reserved_note = 'removed from config; tombstone for history' "
+                        "WHERE id = ?", (rid,))
+                else:
+                    conn.execute("DELETE FROM backends WHERE id = ?", (rid,))
             for p in self.cfg.profiles:
                 conn.execute(
                     """INSERT INTO worker_profiles(id, adapter, executable, args, env_overrides,
@@ -152,9 +165,35 @@ class BackendRegistry:
         b = self.cfg.backend(backend_id)
         if b is None:
             return ProbeResult("offline", None, [], "unknown backend")
-        res = await _probe_endpoint(b.endpoint, self.cfg.daemon.probe_timeout_s)
+        if b.kind == "salad":
+            if self.salad is None:
+                self._record(backend_id, now, ProbeResult(
+                    "offline", None, [], "salad proxy manager unavailable"))
+                return self._last_result[backend_id]
+            # The local proxy is the liveness precondition: without it the
+            # gateway is unreachable for workers no matter what it serves.
+            up, detail = await self.salad.ensure(b)
+            if not up:
+                self._record(backend_id, now,
+                             ProbeResult("offline", None, [], detail))
+                return self._last_result[backend_id]
+            keyfile = b.salad_keyfile or SALAD_KEYFILE_DEFAULT
+            key = read_salad_key(keyfile)
+            headers = {"Salad-Api-Key": key} if key else None
+            res = await _probe_endpoint(b.endpoint,
+                                        self.cfg.daemon.probe_timeout_s,
+                                        headers=headers)
+            if res.ctx_max is None:
+                res.ctx_max = await self._salad_ctx_via_proxy(b)
+        else:
+            res = await _probe_endpoint(b.endpoint,
+                                        self.cfg.daemon.probe_timeout_s)
         if b.ctx_override:
             res.ctx_max = b.ctx_override
+        self._record(backend_id, now, res)
+        return res
+
+    def _record(self, backend_id: str, now: float, res: ProbeResult) -> None:
         self._last_probe[backend_id] = now
         self._last_result[backend_id] = res
         ctx = derive_max_context(res.ctx_max, self.cfg.worker.max_context_pct) if res.ctx_max else None
@@ -162,7 +201,21 @@ class BackendRegistry:
             "UPDATE backends SET health=?, probed_at=?, ctx_max=? WHERE id=?",
             (res.health, now_iso(), ctx, backend_id),
         )
-        return res
+
+    async def _salad_ctx_via_proxy(self, b: BackendConfig) -> int | None:
+        """llama.cpp /props through the proxy's keyed passthrough: the
+        /v1/models shape is OpenAI-shaped and does not always carry n_ctx."""
+        try:
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                r = await client.get(
+                    f"http://127.0.0.1:{b.salad_proxy_port}/__upstream/props")
+            body = r.json()
+            n = (body.get("default_generation_settings") or {}).get("n_ctx")
+            if isinstance(n, int) and n > 0:
+                return n
+        except Exception:  # noqa: BLE001 — ctx is best-effort
+            pass
+        return None
 
     def health_row(self, backend_id: str) -> dict | None:
         row = self.db.query_one("SELECT * FROM backends WHERE id=?", (backend_id,))
@@ -267,22 +320,27 @@ class BackendRegistry:
                 state = "offline"
             else:
                 state = "unknown"
-            out.append({
+            entry = {
                 "id": b.id, "endpoint": b.endpoint, "state": state,
                 "model": b.model_id, "concurrency": b.concurrency,
                 "group": b.resource_group or None,
                 "ctx_limit": row["ctx_max"] if row else None,
                 "health": row["health"] if row else "unknown",
                 "is_primary": b.is_primary,
-            })
+            }
+            if b.kind == "salad":
+                entry["kind"] = "salad"
+                entry["proxy"] = f"127.0.0.1:{b.salad_proxy_port}"
+            out.append(entry)
         return out
 
 
-async def _probe_endpoint(endpoint: str, timeout_s: float) -> ProbeResult:
+async def _probe_endpoint(endpoint: str, timeout_s: float,
+                          headers: dict | None = None) -> ProbeResult:
     url = endpoint.rstrip("/") + "/v1/models"
     try:
         async with httpx.AsyncClient(timeout=timeout_s) as client:
-            r = await client.get(url)
+            r = await client.get(url, headers=headers or {})
         if r.status_code != 200:
             return ProbeResult("offline", None, [], f"HTTP {r.status_code}")
         body = r.json()

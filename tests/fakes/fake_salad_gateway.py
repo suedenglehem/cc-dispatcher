@@ -1,0 +1,143 @@
+"""Fake salad.cloud group: a threaded HTTP server emulating the public
+gateway's observable behavior.
+
+- EVERY request requires the Salad-Api-Key header (403 otherwise) — the
+  defining property of a real group.
+- GET /v1/models   → llama.cpp-shaped body (id + meta.n_ctx).
+- GET /props       → default_generation_settings.n_ctx (the proxy's
+                     /__upstream/props ctx fallback path).
+- POST /v1/completions → 1-token completion (the daemon heartbeat target).
+- POST /v1/chat/completions → minimal OpenAI chat completion (upstream
+                     target of salad_proxy.py; exercised by live smoke,
+                     here only for completeness).
+
+`.stop_group()` emulates a stopped Salad group the way the Cloudflare
+front presents it: the host still answers, with HTTP 503. `.stop()` shuts
+the server down entirely (connection refused).
+"""
+
+from __future__ import annotations
+
+import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+
+class _Handler(BaseHTTPRequestHandler):
+    def _key_ok(self) -> bool:
+        gw = self.server.gw  # type: ignore[attr-defined]
+        return self.headers.get("Salad-Api-Key", "") == gw.key
+
+    def _json(self, code: int, body: dict) -> None:
+        payload = json.dumps(body).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _group_down(self) -> bool:
+        gw = self.server.gw  # type: ignore[attr-defined]
+        if gw.online:
+            return False
+        payload = json.dumps({"error": "group stopped"}).encode("utf-8")
+        self.send_response(503)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+        return True
+
+    def do_GET(self):  # noqa: N802 (http.server API)
+        gw = self.server.gw  # type: ignore[attr-defined]
+        if self._group_down():
+            return
+        if not self._key_ok():
+            self._json(403, {"error": "forbidden"})
+            return
+        p = self.path.split("?", 1)[0].rstrip("/")
+        if p == "/v1/models":
+            self._json(200, gw.models_body())
+        elif p == "/props":
+            self._json(200, {"default_generation_settings":
+                             {"n_ctx": gw.ctx_max}})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def do_POST(self):  # noqa: N802
+        gw = self.server.gw  # type: ignore[attr-defined]
+        if self._group_down():
+            return
+        if not self._key_ok():
+            self._json(403, {"error": "forbidden"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        self.rfile.read(length)
+        p = self.path.split("?", 1)[0].rstrip("/")
+        if p == "/v1/completions":
+            gw.completions += 1
+            self._json(200, {"id": "cmpl-fake",
+                             "choices": [{"text": ".", "index": 0}]})
+        elif p == "/v1/chat/completions":
+            gw.chat_calls += 1
+            self._json(200, {
+                "id": "chat-fake",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant",
+                                         "content": "fake-ok"}}],
+                "usage": {"prompt_tokens": 1, "completion_tokens": 1,
+                          "total_tokens": 2}})
+        else:
+            self._json(404, {"error": "not found"})
+
+    def log_message(self, *args):  # silence
+        pass
+
+
+class FakeSaladGateway:
+    def __init__(self, key: str = "test-salad-key", model: str = "qwen",
+                 ctx_max: int = 32768):
+        self.key = key
+        self.model = model
+        self.ctx_max = ctx_max
+        self.completions = 0     # heartbeat hits
+        self.chat_calls = 0
+        self.online = True
+        self._server: ThreadingHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+        self.port: int | None = None
+
+    def models_body(self) -> dict:
+        return {"data": [{"id": self.model,
+                          "meta": {"n_ctx": self.ctx_max}}]}
+
+    def start(self) -> "FakeSaladGateway":
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+        self._server.gw = self  # type: ignore[attr-defined]
+        self.port = self._server.server_address[1]
+        self._thread = threading.Thread(
+            target=self._server.serve_forever, daemon=True,
+            name=f"fake-salad-{self.port}")
+        self._thread.start()
+        return self
+
+    def stop_group(self) -> None:
+        """Group stopped by the user: the gateway answers 503."""
+        self.online = False
+
+    def start_group(self) -> None:
+        self.online = True
+
+    def stop(self) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+            self._server = None
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+            self._thread = None
+
+    @property
+    def gateway_url(self) -> str:
+        assert self.port is not None, "FakeSaladGateway.start() not called"
+        return f"http://127.0.0.1:{self.port}"
