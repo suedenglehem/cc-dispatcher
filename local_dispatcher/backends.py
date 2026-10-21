@@ -90,14 +90,15 @@ class BackendRegistry:
                 conn.execute(
                     """INSERT INTO backends(id, endpoint, openai_base_url, model_id, model_label,
                        credential_env, enabled, is_primary, manually_reserved, reserved_note,
-                       concurrency, resource_group, notes, kind, salad_keyfile,
+                       concurrency, priority, resource_group, notes, kind, salad_keyfile,
                        salad_proxy_port, salad_thinking, salad_heartbeat)
-                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(id) DO UPDATE SET endpoint=excluded.endpoint,
                        openai_base_url=excluded.openai_base_url,
                        model_id=excluded.model_id, model_label=excluded.model_label,
                        """ + runtime_update + """is_primary=excluded.is_primary,
-                       concurrency=excluded.concurrency, resource_group=excluded.resource_group,
+                       concurrency=excluded.concurrency, priority=excluded.priority,
+                       resource_group=excluded.resource_group,
                        notes=excluded.notes, kind=excluded.kind,
                        salad_keyfile=excluded.salad_keyfile,
                        salad_proxy_port=excluded.salad_proxy_port,
@@ -105,7 +106,7 @@ class BackendRegistry:
                        salad_heartbeat=excluded.salad_heartbeat""",
                     (b.id, b.endpoint, b.openai_base_url, b.model_id, b.model_label,
                      _json(b.credential_env), b.enabled, b.is_primary, b.manually_reserved,
-                     b.reserved_note, b.concurrency, b.resource_group or None, b.notes,
+                     b.reserved_note, b.concurrency, b.priority, b.resource_group or None, b.notes,
                      b.kind, b.salad_keyfile or None, b.salad_proxy_port or None,
                      b.salad_thinking, b.salad_heartbeat),
                 )
@@ -288,13 +289,20 @@ class BackendRegistry:
     def pick_backend(self, profile_backend_ids: list[str], preferred: str | None = None,
                      adapter: str | None = None) -> str | None:
         """First eligible backend: enabled, not primary, not manually reserved,
-        online with a fresh probe, with free capacity. Preferred id first, then
-        config order.
+        online with a fresh probe, with free capacity. The preferred id is
+        tried first overall; otherwise higher `priority` is tried first
+        (default 1 = baseline) and equal priorities keep the profile's
+        backend_ids order.
 
         adapter: a cline worker speaks OpenAI chat completions directly; the
         salad proxy only speaks Anthropic, so salad backends are skipped for
         it (otherwise every request would 403 at the gateway)."""
         order = list(profile_backend_ids)
+        # Stable sort: ties keep the profile's declared order. Unknown ids
+        # (stale profile row) sort last rather than crashing the tick.
+        order.sort(key=lambda bid: (self.cfg.backend(bid).priority
+                                    if self.cfg.backend(bid) else 0),
+                   reverse=True)
         if preferred and preferred in order:
             order.remove(preferred)
             order.insert(0, preferred)
@@ -356,6 +364,7 @@ class BackendRegistry:
             entry = {
                 "id": b.id, "endpoint": b.endpoint, "state": state,
                 "model": b.model_id, "concurrency": b.concurrency,
+                "priority": b.priority,
                 "group": b.resource_group or None,
                 "ctx_limit": row["ctx_max"] if row else None,
                 "health": row["health"] if row else "unknown",

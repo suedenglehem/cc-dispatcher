@@ -63,9 +63,9 @@ def _scalar(v) -> str:
 
 
 def _row(row: dict) -> str:
-    keep = ("id", "status", "state", "objective", "model", "backend_id",
-            "profile_id", "failure_class", "event", "endpoint", "health",
-            "detail", "code", "message")
+    keep = ("id", "status", "state", "objective", "model", "priority",
+            "backend_id", "profile_id", "failure_class", "event", "endpoint",
+            "health", "detail", "code", "message")
     parts = [f"{k}={_scalar(row[k])}" for k in keep
              if k in row and row[k] is not None]
     if "ts" in row:
@@ -181,7 +181,7 @@ def c_backend_add_salad(args) -> int:
     r = _client(args).backend_add_salad(
         args.url, id=args.id, port=args.port, keyfile=args.keyfile,
         model=args.model, thinking=args.thinking, concurrency=args.concurrency,
-        resource_group=args.group, notes=args.notes)
+        priority=args.priority, resource_group=args.group, notes=args.notes)
     _out(args, r)
     return 0
 
@@ -396,6 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--thinking", action="store_true",
                    help="request reasoning effort upstream")
     b.add_argument("--concurrency", type=int, default=1)
+    b.add_argument("--priority", type=int, default=1,
+                   help="scheduling priority; higher is tried first (default 1)")
     b.add_argument("--group", default="", help="resource group id")
     b.add_argument("--notes", default="")
     b.set_defaults(fn=c_backend_add_salad)

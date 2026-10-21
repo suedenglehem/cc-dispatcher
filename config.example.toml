@@ -105,6 +105,8 @@ model_id = "qwen3.8-27b"
 model_label = "qwen3.8-27b"
 enabled = true
 resource_group = "tr4"
+# priority = 2   # tried before lower-priority backends when several fit
+#                # (default 1); equal priorities keep backend_ids order
 notes = "WINDOWS boot of the dual-boot box"
 
 [[backends]]

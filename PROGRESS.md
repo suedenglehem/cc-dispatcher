@@ -18,6 +18,7 @@
 | P3 | Recovery, restart reconcile, mycelium memory, failure injection → 20/20 acceptance | ✅ done (2026-10-17) |
 | P4 | Cline adapter, resource-group demo, hardening, full docs + install | ✅ done (2026-10-17): live smokes run — ak PASS, **Cline PASS** (root-caused → `ccline` fix → real pass `j_bba5405826`), group cap proven live |
 | P5 | SaladCloud backends: `ladd -a/-d URL`, local Anthropic→OpenAI proxy, keyed probes, heartbeat | ✅ done (2026-10-19): 129/129 tests; register-while-stopped verified (503 path); **live online worker smoke PASS** (`j_d12f1ae064`, attempt 1, ~13.5 min) after fixing the proxy's clean-empty-stream bug. Committed `3314331` |
+| P6 | Backend priority: `priority = N` per `[[backends]]` (default 1); among free backends the highest priority gets the job first | ✅ done (2026-10-22): 6 new unit tests green; live config set (tr4-primary 3, i7 2, tr4-secondary/ak/salad 1); daemon restarted, schema v3 |
 
 ## Acceptance tests (PRD §14)
 - **GREEN: 20/20** — a10 with a REAL `dispatcherd` subprocess (SIGKILL mid-job → restart →
@@ -349,11 +350,58 @@ keeps the proxy alive, probes with the key, and schedules on it when online.
     local-dispatcher`; on restart the existing salad proxy (old nonce) is
     replaced automatically.
 
-Next unfinished task: none in the dispatcher (P5 closed; review fixes are
-committed and pushed). Operational step left to the user: restart
-`local-dispatcher` so the reviewed code is live. on_salad: the user runs the
-live `claude/TESTS.md` steps tomorrow (salad group up); the offline suite
-already passes 10/10.
+12. **i7 install + clov auto-registration (2026-10-19).** Dispatcher installed
+    on the i7 Linux boot at **`/dd2/andrei/claude/dispatcher`** (git clone of
+    `a447edf` + venv + editable install). Live config
+    `~/.config/local-dispatcher/config.toml` (0600): backend `i7-local` →
+    `http://127.0.0.1:8080`, alias `qwen3.8-27b`, keyless after the user
+    corrected the llama-server launch script (the earlier `--api-key` instance
+    plus unauthenticated probes/diagnostics caused the observed 401s);
+    profile `cc-worker`; `[mycelium]` enabled. systemd user unit
+    `local-dispatcher` **active + enabled**, linger yes; `ladd` symlinked into
+    `~/.local/bin`; `dispatcher` MCP registered **user scope** and connected.
+    Verified: `/v1/models` 200, `ladd workers --refresh` →
+    `i7-local state=available health=online`.
+    **Probe-auth fix:** a local backend started with llama.cpp `--api-key`
+    read as offline forever (the probe sent no auth). Added
+    `_backend_auth_headers()` (x-api-key + Bearer from `credential_env`) + a
+    regression test; committed **`a447edf`**, pushed.
+    **clov auto-init:** `/usr/local/bin/clov` on **tr4 and i7** (backups
+    `clov.bak-2026-10-19`) now, once per git repo marked by
+    `<repo-root>/.ladd`, prompts `[y/N]` to `git init -b main` when needed,
+    registers the project with `ladd project add` (id from the directory name,
+    path-hash suffix on collision), writes `.ladd`, and adds it to
+    `.git/info/exclude`. Marker present ⇒ skip; daemon/ladd failure ⇒ warning
+    and Claude still starts. Tested with a mocked `ladd` on both hosts: fresh
+    repo, rerun, already-registered path, id collision, git-init yes/no,
+    add-failure. `HANDOFF.md` item 10 records it (uncommitted).
+    **Known problems:** none. Note `project add` defaults to **single** mode;
+    switch with `ladd mode <id> team` when a worker backend is free.
+
+13. **Claude Code /usage cost pricing (2026-10-19).** Reconfigured cost
+    calculation via **`/etc/claude-code/managed-settings.json`** on tr4 and i7
+    (root, 0644, identical): 30 `modelPricing.overrides` rows. Why managed:
+    Claude Code honors `modelPricing` only from managed settings (user/project
+    settings are rejected as an untrusted origin). Rates (DeepSeek **peak**,
+    USD/Mtok, from api-docs.deepseek.com pricing): `deepseek-flash[1m]` input
+    cache-miss 0.30, cache-hit 0.006, output 1.20, cacheWrite 0.30. The
+    pricing layer strips `[1m]`, so the same row also prices `deepseek-flash`
+    (the paid haiku/subagent model in `dclo`). All other models are zero:
+    local ids (qwen3.8-27b, qwen3.8-27b-fp8, Qwen3.8-27B-Q6_K_L,
+    swift-1.5-iq3_xxs, local-metrics, qwen38-27b, qwen) plus the full built-in
+    Claude catalog (subagent/background ids). Verified on both hosts against a
+    fake local Anthropic endpoint returning 1M input + 1M output:
+    qwen3.8-27b → **$0**, deepseek-flash[1m] → **$1.50**,
+    claude-haiku-4-5 → **$0**, all with `costBasis: managed`.
+    Caveats: running sessions must restart to load managed settings;
+    historical /usage stats keep their recorded costs; peak rates chosen
+    (off-peak is half); built-in Claude ids also read $0 on these hosts.
+    Ops note: the first write accidentally captured the sudo password line
+    (cached sudo credential); it was rewritten immediately and verified absent.
+
+Next unfinished task: none in the dispatcher. Restart running Claude sessions
+to load the new managed pricing; i7/clov are live and auto-register repos.
+on_salad live `claude/TESTS.md` steps remain pending the salad group.
 
 ## Decisions log (condensed; full list in HANDOFF.md)
 - Worker permission: `bypassPermissions` + strict `--allowedTools` allowlist (PRD §10 concedes "validation, not OS isolation")
@@ -364,11 +412,12 @@ already passes 10/10.
 - SIGTERM (`systemctl --user stop`; there is no `ladd stop`): stop the scheduler,
   **leave workers running** (re-adopted on restart)
 - Runtime `ladd backend ...` changes are live-only; config reasserts on the next daemon start (safety property)
+- Backend priority (2026-10-22, user-specified): `priority` per `[[backends]]` (int ≥ 1, default 1); among free backends the **highest priority gets the job first**, ties keep the profile's `backend_ids` order; an explicit `backend_id` at submit still wins over priority
 - API wire: newline-JSON over a Unix socket (0600); credential redaction; 8k response cap
 - **Worker-death 143 (external SIGTERM): SUSPENDED** — not reproducible on the current daemon;
   dispatcher / systemd-oomd / kernel OOM / Cline all exonerated with evidence. See HANDOFF.md + mycelium memory #195.
 
-## Live environment (as of 2026-10-19)
+## Live environment (as of 2026-10-22)
 - tr4-primary `:8091` (vLLM, qwen3.8-27b-fp8) = the primary coordinating session, never worker-scheduled.
 - tr4-secondary `:8080` (strata, `swift-1.5-iq3_xxs`) = RESERVED for the Cline interactive session.
 - **Dual-boot box** (topology user-corrected 2026-10-17; the "renamed i7→ak,
@@ -383,6 +432,10 @@ already passes 10/10.
   (`ladd backend release tr4-secondary`) only while that session is off it,
   and re-reserve after any demo. Config is the source of truth and re-asserts
   these states on every daemon start.
+- **Priorities (set 2026-10-22):** tr4-primary 3, i7 2, tr4-secondary 1, ak 1,
+  tamarind salad 1 → when the dual-boot box's LINUX boot (i7) is up and both it
+  and tr4-secondary are free, i7 gets the job first; the rest keep
+  `backend_ids` order (tr4-secondary, ak, salad).
 - **SaladCloud**: `tamarind-caraway-1rpqcqcnbbkmqdbv` (qwen, model label
   `qwen`) registered live via `ladd -a` 2026-10-19 while the group was
   stopped (503 → `offline`, proxy on 127.0.0.1:18100), flipped `available`

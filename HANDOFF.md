@@ -103,6 +103,13 @@ agents do the reasoning.
   `test_i_salad.py` 12 integration cases, incl. a real worker job on a salad backend and
   the heartbeat on the real tick path).
 
+- P6 (backend priority): **complete (2026-10-22)** — `priority` per `[[backends]]`
+  (int ≥ 1, default 1). Semantics (user-specified): among free backends the
+  HIGHEST priority gets the job first; ties keep the profile's `backend_ids`
+  order; an explicit `backend_id` at submit still wins. Live config set:
+  tr4-primary 3, i7 2, tr4-secondary/ak/salad 1; daemon restarted (schema v3).
+  6 new unit tests; full suite re-run green.
+
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
 - Symptom: 4 daemon-spawned workers on the OLD daemon (pid 16445) died exit 143 (SIGTERM, class=crash),
   attempt 1 only, ~26 min apart, on BOTH backends. **Zero deaths on the NEW daemon (pid 43684) across 5+
@@ -167,6 +174,37 @@ agents do the reasoning.
   fix — a real-model job cited numeric ids and the OLD daemon still rejected them), restart:
   `systemctl --user restart local-dispatcher`. Check freshness with
   `systemctl --user show local-dispatcher -p MainPID,ActiveEnterTimestampMonotonic` vs file mtimes.
+
+## Changed files (2026-10-22 — backend priority)
+- Feature: `priority` (int ≥ 1, default 1) per `[[backends]]`. `pick_backend`
+  tries the highest priority first among free backends (stable sort — ties keep
+  the profile's `backend_ids` order); preferred/submit-pinned id stays first overall.
+- `local_dispatcher/config.py` — `BackendConfig.priority: int = 1`; TOML parse
+  `int(b.get("priority", 1))`; `_validate` rejects `priority < 1`.
+- `local_dispatcher/migrations/0003_priority.sql` (NEW) —
+  `ALTER TABLE backends ADD COLUMN priority INTEGER NOT NULL DEFAULT 1`.
+  **Gotcha:** the migration runner splits statements on EVERY `;` — a semicolon
+  inside a SQL comment breaks the migration (hit on the first draft; comments
+  must stay semicolon-free).
+- `local_dispatcher/backends.py` — `sync()` persists priority (INSERT + ON
+  CONFLICT); `pick_backend` sorts candidates by descending priority;
+  `worker_availability()` entries gain `priority`.
+- `local_dispatcher/models.py` / `api.py` / `cli.py` — `backend_add_salad`
+  gains a `priority` param + `--priority` flag (default 1); `salad.py`
+  `salad_block_text` writes `priority = N` only when ≠ 1. `cli.py` `_row`
+  keep-tuple gains `priority` (shows in `ladd workers`).
+- `tests/test_u_backend_priority.py` (NEW, 6) — higher-priority-first with
+  fall-through as top candidates go offline; defaults keep declared order;
+  preferred beats priority; sync persists + worker view exposes it; TOML parse
+  (default/explicit); `priority = 0` rejected.
+- Docs: `BACKENDS.md` (field reference line), `config.example.toml` (commented
+  example on `ak`), `PROGRESS.md` (P6 milestone row + decisions log + live env).
+- `~/.config/local-dispatcher/config.toml` (LIVE, not in repo) — priorities set
+  per user: tr4-primary 3, tr4-secondary 1, ak 1, i7 2,
+  tamarind-caraway salad 1. Validated with `load_config` before restart; daemon
+  restarted with zero active jobs (all 7 jobs were blocked) → safe. Verified
+  post-restart: `schema_version: 3`, `ladd workers` priorities
+  {3, 1, 1, 2, 1} in JSON + text.
 
 ## Changed files (P5 — SaladCloud backends, 2026-10-19)
 - `local_dispatcher/salad_proxy.py` (NEW, vendored, stdlib-only) — local 127.0.0.1 proxy:
@@ -440,6 +478,7 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
+- pytest: **153 passed, 0 failed** (2026-10-22, incl. 6 new backend-priority tests)
 - pytest: **129 passed, 0 skipped** (2026-10-19) — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess
@@ -602,3 +641,20 @@ agents do the reasoning.
    Tests: **146 passed** (129 before + 17 new regression tests), warnings-as-errors
    run green; the live `~/.config/local-dispatcher/config.toml` validates under
    the new rules. All changes are uncommitted in the working tree.
+10. clov auto-registers projects with the dispatcher (2026-10-19). Patched
+    `/usr/local/bin/clov` on tr4 and i7 (backups: `clov.bak-2026-10-19`).
+    Before exec'ing Claude Code, once per git repo (marker `<repo-root>/.ladd`):
+    if the directory is not a repo it prompts `[y/N]` to `git init -b main`;
+    then it asks the daemon whether this `repo_path` is already registered,
+    otherwise derives an id from the directory name (short hash suffix on
+    collision), runs `ladd project add <id> <repo-root>`, writes `.ladd`
+    (project id + path), and adds `.ladd` to `.git/info/exclude` so a marker
+    cannot be committed and wrongly suppress registration on the other host.
+    Presence of `.ladd` skips the step. Daemon/ladd absence or add failure is
+    non-fatal: warning + Claude still starts; the next run retries. Tested on
+    both hosts with a mocked ladd: fresh repo, rerun, already-registered path,
+    id collision, git-init yes/no, and add-failure paths.
+    Also: the i7 install moved to **`/dd2/andrei/claude/dispatcher`** (git clone
+    of a447edf + venv); systemd unit, user-scope `dispatcher` MCP server and
+    `~/.local/bin/ladd` repointed; the temporary `~/claude/dispatcher` copy was
+    removed. i7 config stays keyless (`i7-local`, alias `qwen3.8-27b`).

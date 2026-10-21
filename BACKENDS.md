@@ -15,6 +15,8 @@ model_id = "qwen3.8-27b"        # id the server reports
 model_label = "qwen3.8-27b"     # passed to `claude --model`
 concurrency = 1
 resource_group = "local"
+# priority = 1              # when several fit, higher is tried first (default 1);
+                            # equal priorities keep the profile's backend_ids order
 # enabled = false               # exclude from scheduling
 # is_primary = true             # reserve for the coordinating session
 # manually_reserved = true      # exclude from worker jobs

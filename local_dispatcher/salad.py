@@ -392,6 +392,8 @@ def salad_block_text(b: BackendConfig) -> str:
         lines.append(f"salad_keyfile = {_toml_str(b.salad_keyfile)}")
     if b.concurrency != 1:
         lines.append(f"concurrency = {b.concurrency}")
+    if b.priority != 1:
+        lines.append(f"priority = {b.priority}")
     if b.resource_group:
         lines.append(f"resource_group = {_toml_str(b.resource_group)}")
     if b.salad_thinking:

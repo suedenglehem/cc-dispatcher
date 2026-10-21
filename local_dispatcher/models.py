@@ -168,6 +168,7 @@ class BackendAddSaladParams(BaseModel):
     model: str = Field(default="qwen", min_length=1)
     thinking: bool = False
     concurrency: int = Field(default=1, ge=1)
+    priority: int = Field(default=1, ge=1)
     resource_group: str = ""
     notes: str = ""
 

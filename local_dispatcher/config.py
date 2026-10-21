@@ -126,6 +126,10 @@ class BackendConfig:
     manually_reserved: bool = False
     reserved_note: str = ""
     concurrency: int = 1
+    # Scheduling preference among otherwise-eligible backends: higher is
+    # tried first by pick_backend; equal priorities keep the profile's
+    # backend_ids order. Default 1 = baseline.
+    priority: int = 1
     resource_group: str = ""
     ctx_override: int = 0
     notes: str = ""
@@ -311,6 +315,7 @@ def load_config(path: str | Path | None = None) -> Config:
             manually_reserved=b.get("manually_reserved", False),
             reserved_note=b.get("reserved_note", ""),
             concurrency=b.get("concurrency", 1),
+            priority=int(b.get("priority", 1)),
             resource_group=b.get("resource_group", ""),
             ctx_override=b.get("ctx_override", 0), notes=b.get("notes", ""),
             kind=b.get("kind", "local"),
@@ -375,6 +380,8 @@ def _validate(cfg: Config) -> None:
             raise ValueError(f"backend {b.id}: unknown resource_group {b.resource_group!r}")
         if b.concurrency < 1:
             raise ValueError(f"backend {b.id}: concurrency must be >= 1")
+        if b.priority < 1:
+            raise ValueError(f"backend {b.id}: priority must be >= 1")
         if b.kind not in ("local", "salad"):
             raise ValueError(f"backend {b.id}: unknown kind {b.kind!r} "
                              f"(local | salad)")

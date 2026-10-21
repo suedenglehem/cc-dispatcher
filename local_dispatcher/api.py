@@ -485,6 +485,7 @@ class ApiServer:
                           salad_keyfile=keyfile, salad_proxy_port=port,
                           salad_thinking=params.thinking,
                           concurrency=params.concurrency,
+                          priority=params.priority,
                           resource_group=params.resource_group,
                           notes=params.notes)
         text = ""
@@ -726,11 +727,13 @@ class ApiClient:
     def backend_add_salad(self, url: str, id: str | None = None,
                           port: int | None = None, keyfile: str = "",
                           model: str = "qwen", thinking: bool = False,
-                          concurrency: int = 1, resource_group: str = "",
+                          concurrency: int = 1, priority: int = 1,
+                          resource_group: str = "",
                           notes: str = "") -> dict:
         return self.call("backend_add_salad", url=url, id=id, port=port,
                          keyfile=keyfile, model=model, thinking=thinking,
-                         concurrency=concurrency, resource_group=resource_group,
+                         concurrency=concurrency, priority=priority,
+                         resource_group=resource_group,
                          notes=notes)
 
     def backend_remove_salad(self, backend_id: str) -> dict:
