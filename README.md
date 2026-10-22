@@ -11,11 +11,11 @@ on 2 3090ies and 3080ti can run flash next iq3xs 100Kctx via strata. and i have
 second box with 4080s+4060ti, these are good for running flash next iq3xs
 on 2 cards with 220k ctx at 60tps or iq4 at 30 tps. so, dispatcher allows 
 claude to run subasks on these strata backends. AND, i can add backends on
-either salad's cards or vast.ai cards. that's it. i could redefine claude's
-haiku, sonner, opus internal models to point them to different local llms,
-but dispatcher does the job fine and i can use it with paid services. once
-dispatcher is added to cc's mcp, just tell cc to run subtasks on dispatcher's
-backends using priorities 
+either salad's cards or vast.ai cards. that's it. i could also redefine claude's
+haiku, sonner, opus internal models to point them to different local llms, or make
+a proxy to forward prompts to different idle backends, but dispatcher does the 
+job fine and i can use it with paid services. once dispatcher is added to 
+cc's mcp, just tell cc to run subtasks on dispatcher's backends using priorities.
 
 ==============================================================================
 
