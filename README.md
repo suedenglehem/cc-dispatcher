@@ -4,7 +4,7 @@
 
 You won't need this one if you're buying tokens on commercial connectors.
 I made this "dispatcher" to allow my claude code (cc) to maximize the use
-of my local llm's ressources, i have tight hw bounds, vram a ram are not that 
+of my local llm's ressources, i have tight hw bounds, vram & ram are not that 
 plenty, so, i run parallel=1 mostly, but i have 2x3090 + 3080ti on one machine, 
 the best is to run vllm (or sglang, which is faster, but vllm is more stable)
 on 2 3090ies and 3080ti can run flash next iq3xs 100Kctx via strata. and i have
