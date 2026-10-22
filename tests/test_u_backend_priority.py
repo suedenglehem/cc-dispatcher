@@ -1,4 +1,5 @@
-"""Backend priority (default 1): config parse, persistence, pick order."""
+"""Backend priority (lower wins, default 10): config parse, persistence,
+pick order, space ban in backend ids."""
 
 from __future__ import annotations
 
@@ -30,8 +31,8 @@ def _online(tmp_path, priorities: list[int]) -> BackendRegistry:
     return reg
 
 
-def test_pick_backend_higher_priority_first(tmp_path):
-    reg = _online(tmp_path, [1, 5, 2])
+def test_pick_backend_lower_priority_first(tmp_path):
+    reg = _online(tmp_path, [3, 1, 2])
     try:
         assert reg.pick_backend(["b0", "b1", "b2"]) == "b1"
         reg.db.execute("UPDATE backends SET health='offline' WHERE id='b1'")
@@ -43,7 +44,7 @@ def test_pick_backend_higher_priority_first(tmp_path):
 
 
 def test_pick_backend_default_priority_keeps_declared_order(tmp_path):
-    reg = _online(tmp_path, [1, 1, 1])      # all default
+    reg = _online(tmp_path, [10, 10, 10])   # all default (10 = lowest)
     try:
         assert reg.pick_backend(["b2", "b0", "b1"]) == "b2"   # declared order
         reg.db.execute("UPDATE backends SET health='offline' WHERE id='b2'")
@@ -55,20 +56,20 @@ def test_pick_backend_default_priority_keeps_declared_order(tmp_path):
 def test_pick_backend_preferred_beats_priority(tmp_path):
     reg = _online(tmp_path, [1, 9])
     try:
-        assert reg.pick_backend(["b0", "b1"], preferred="b0") == "b0"
         assert reg.pick_backend(["b0", "b1"], preferred="b1") == "b1"
+        assert reg.pick_backend(["b0", "b1"], preferred="b0") == "b0"
     finally:
         reg.db.close()
 
 
 def test_sync_persists_priority(tmp_path):
-    reg = _online(tmp_path, [1, 7])
+    reg = _online(tmp_path, [10, 2])
     try:
         rows = {r["id"]: r["priority"] for r in
                 reg.db.query("SELECT id, priority FROM backends")}
-        assert rows == {"b0": 1, "b1": 7}
+        assert rows == {"b0": 10, "b1": 2}
         states = {w["id"]: w["priority"] for w in reg.worker_availability()}
-        assert states == {"b0": 1, "b1": 7}
+        assert states == {"b0": 10, "b1": 2}
     finally:
         reg.db.close()
 
@@ -81,7 +82,7 @@ def test_config_priority_parse(tmp_path):
         'priority = 4\n',
         encoding="utf-8")
     cfg = load_config(p)
-    assert cfg.backend("lo").priority == 1        # default
+    assert cfg.backend("lo").priority == 10       # default
     assert cfg.backend("hi").priority == 4
 
 
@@ -90,4 +91,12 @@ def test_config_rejects_low_priority(tmp_path):
     p.write_text('[[backends]]\nid = "x"\nendpoint = "http://127.0.0.1:9202"\n'
                  'priority = 0\n', encoding="utf-8")
     with pytest.raises(ValueError, match="priority must be >= 1"):
+        load_config(p)
+
+
+def test_config_rejects_space_in_backend_id(tmp_path):
+    p = tmp_path / "config.toml"
+    p.write_text('[[backends]]\nid = "bad id"\n'
+                 'endpoint = "http://127.0.0.1:9203"\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="must not contain spaces"):
         load_config(p)

@@ -290,9 +290,9 @@ class BackendRegistry:
                      adapter: str | None = None) -> str | None:
         """First eligible backend: enabled, not primary, not manually reserved,
         online with a fresh probe, with free capacity. The preferred id is
-        tried first overall; otherwise higher `priority` is tried first
-        (default 1 = baseline) and equal priorities keep the profile's
-        backend_ids order.
+        tried first overall; otherwise LOWER `priority` is tried first
+        (1 beats 2, 3, ...; default 10 = baseline/lowest) and equal
+        priorities keep the profile's backend_ids order.
 
         adapter: a cline worker speaks OpenAI chat completions directly; the
         salad proxy only speaks Anthropic, so salad backends are skipped for
@@ -301,8 +301,7 @@ class BackendRegistry:
         # Stable sort: ties keep the profile's declared order. Unknown ids
         # (stale profile row) sort last rather than crashing the tick.
         order.sort(key=lambda bid: (self.cfg.backend(bid).priority
-                                    if self.cfg.backend(bid) else 0),
-                   reverse=True)
+                                    if self.cfg.backend(bid) else float("inf")))
         if preferred and preferred in order:
             order.remove(preferred)
             order.insert(0, preferred)

@@ -126,10 +126,10 @@ class BackendConfig:
     manually_reserved: bool = False
     reserved_note: str = ""
     concurrency: int = 1
-    # Scheduling preference among otherwise-eligible backends: higher is
+    # Scheduling preference among otherwise-eligible backends: LOWER is
     # tried first by pick_backend; equal priorities keep the profile's
-    # backend_ids order. Default 1 = baseline.
-    priority: int = 1
+    # backend_ids order. Default 10 = baseline (the lowest common value).
+    priority: int = 10
     resource_group: str = ""
     ctx_override: int = 0
     notes: str = ""
@@ -315,7 +315,7 @@ def load_config(path: str | Path | None = None) -> Config:
             manually_reserved=b.get("manually_reserved", False),
             reserved_note=b.get("reserved_note", ""),
             concurrency=b.get("concurrency", 1),
-            priority=int(b.get("priority", 1)),
+            priority=int(b.get("priority", 10)),
             resource_group=b.get("resource_group", ""),
             ctx_override=b.get("ctx_override", 0), notes=b.get("notes", ""),
             kind=b.get("kind", "local"),
@@ -376,6 +376,8 @@ def _validate(cfg: Config) -> None:
     backend_ids = {b.id for b in cfg.backends}
     salad_ports: dict[int, str] = {}
     for b in cfg.backends:
+        if " " in b.id:
+            raise ValueError(f"backend {b.id!r}: id must not contain spaces")
         if b.resource_group and b.resource_group not in group_ids:
             raise ValueError(f"backend {b.id}: unknown resource_group {b.resource_group!r}")
         if b.concurrency < 1:

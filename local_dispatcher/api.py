@@ -356,10 +356,12 @@ class ApiServer:
             else row["manually_reserved"]
         note = params.note if (params.note or params.reserved is not None) \
             else row["reserved_note"]
+        priority = params.priority if params.priority is not None else row["priority"]
         with self.db.tx() as c:
             c.execute("UPDATE backends SET enabled=?, manually_reserved=?, "
-                      "reserved_note=? WHERE id=?",
-                      (1 if enabled else 0, reserved, note or None, params.backend_id))
+                      "reserved_note=?, priority=? WHERE id=?",
+                      (1 if enabled else 0, reserved, note or None, priority,
+                       params.backend_id))
         # pick_backend/worker_availability gate on the in-memory config, not
         # the DB row — keep the two in lockstep or runtime changes would need
         # a daemon restart to take effect (config still reasserts on start).
@@ -368,9 +370,11 @@ class ApiServer:
             b.enabled = bool(enabled)
             b.manually_reserved = bool(reserved)
             b.reserved_note = note or None
+            b.priority = int(priority)
         self.db.event("backend", params.backend_id,
                       "backend_modified",
-                      {"enabled": enabled, "reserved": bool(reserved)})
+                      {"enabled": enabled, "reserved": bool(reserved),
+                       "priority": int(priority)})
         return {"backend": dict(self.db.query_one(
             "SELECT * FROM backends WHERE id=?", (params.backend_id,)))}
 
@@ -720,14 +724,15 @@ class ApiClient:
         return self.call("backend_list")
 
     def backend_set(self, backend_id: str, enabled: bool | None = None,
-                    reserved: bool | None = None, note: str = "") -> dict:
+                    reserved: bool | None = None, note: str = "",
+                    priority: int | None = None) -> dict:
         return self.call("backend_set", backend_id=backend_id, enabled=enabled,
-                         reserved=reserved, note=note)
+                         reserved=reserved, note=note, priority=priority)
 
     def backend_add_salad(self, url: str, id: str | None = None,
                           port: int | None = None, keyfile: str = "",
                           model: str = "qwen", thinking: bool = False,
-                          concurrency: int = 1, priority: int = 1,
+                          concurrency: int = 1, priority: int = 10,
                           resource_group: str = "",
                           notes: str = "") -> dict:
         return self.call("backend_add_salad", url=url, id=id, port=port,

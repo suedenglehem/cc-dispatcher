@@ -436,6 +436,15 @@ on_salad live `claude/TESTS.md` steps remain pending the salad group.
   tamarind salad 1 → when the dual-boot box's LINUX boot (i7) is up and both it
   and tr4-secondary are free, i7 gets the job first; the rest keep
   `backend_ids` order (tr4-secondary, ak, salad).
+- **i7 dispatcher (2026-10-22):** install at `/dd2/andrei/claude/dispatcher`,
+  daemon on schema v3 (its venv has no pytest — deployment clone; `ladd` at
+  `~/.local/bin/ladd`). Its config now schedules three backends:
+  `tr4-primary` (vLLM qwen3.8-27b-fp8, LAN 192.168.0.30:8091) priority 1,
+  `i7-local` priority 2, `tr4-secondary` (LAN 192.168.0.30:8080) priority 3
+  (lower wins; default 10 = lowest); `cc-worker` `backend_ids` covers all
+  three. Config backup `config.toml.bak-2026-10-22` on i7. User: only ONE
+  primary works at a time, so the two daemons never dispatch concurrently
+  (tr4's vLLM never sees combined load — don't re-flag).
 - **SaladCloud**: `tamarind-caraway-1rpqcqcnbbkmqdbv` (qwen, model label
   `qwen`) registered live via `ladd -a` 2026-10-19 while the group was
   stopped (503 → `offline`, proxy on 127.0.0.1:18100), flipped `available`

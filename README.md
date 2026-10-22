@@ -72,8 +72,9 @@ Core guarantees (enforced in the daemon, not by convention):
 ## Install
 
 ```sh
-cd /dd2/andrei/claude/dispatcher
-./install.sh
+git clone https://github.com/suedenglehem/cc-dispatcher.git
+cd cc-dispatcher
+bash -x ./install.sh
 ```
 
 Safe to re-run. It: (1) creates `.venv` + editable install → console scripts

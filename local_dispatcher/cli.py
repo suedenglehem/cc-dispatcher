@@ -77,6 +77,29 @@ def _row(row: dict) -> str:
 
 
 # -- commands -------------------------------------------------------------------
+def _backend_row(row: dict) -> str:
+    """One-line key-field summary for `ladd backend list`."""
+    parts = [f"id={row['id']}"]
+    for k, v in (("endpoint", row.get("endpoint")),
+                 ("model", row.get("model_label") or row.get("model_id")),
+                 ("priority", row.get("priority")),
+                 ("concurrency", row.get("concurrency")),
+                 ("group", row.get("resource_group")),
+                 ("health", row.get("health"))):
+        if v not in (None, ""):
+            parts.append(f"{k}={_scalar(v)}")
+    if row.get("kind") == "salad":
+        parts.append("salad")
+    if row.get("is_primary"):
+        parts.append("primary")
+    if not row.get("enabled"):
+        parts.append("disabled")
+    if row.get("manually_reserved"):
+        note = row.get("reserved_note")
+        parts.append(f"reserved={_scalar(note)}" if note else "reserved")
+    return "  ".join(parts)
+
+
 def c_status(args) -> int:
     _out(args, _client(args).status(all_jobs=args.all_jobs))
     return 0
@@ -160,7 +183,36 @@ def c_reconcile(args) -> int:
 
 
 def c_backend_list(args) -> int:
-    _out(args, _client(args).backend_list())
+    r = _client(args).backend_list()
+    if getattr(args, "json", False):
+        _out(args, r)
+    else:
+        print("backends:")
+        for row in r["backends"]:
+            print("  " + _backend_row(row))
+    return 0
+
+
+def c_backend_describe(args) -> int:
+    """Full config dump of one backend (every stored field, credentials redacted)."""
+    rows = _client(args).backend_list()["backends"]
+    row = next((b for b in rows if b["id"] == args.backend_id), None)
+    if row is None:
+        raise ApiError(ErrorCodes.BACKEND_UNKNOWN,
+                       f"unknown backend {args.backend_id!r}",
+                       known=[b["id"] for b in rows])
+    _out(args, {"backend": row})
+    return 0
+
+
+def c_backend_priority(args) -> int:
+    r = _client(args).backend_set(args.backend_id, priority=args.priority)
+    if getattr(args, "json", False):
+        _out(args, r)
+    else:
+        row = r["backend"]
+        print(f"backend {row['id']}: priority = {row['priority']} "
+              "(live only — the config file reasserts on daemon restart)")
     return 0
 
 
@@ -370,8 +422,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("backend", help="backend management")
     bsub = p.add_subparsers(dest="bcmd", required=True)
-    b = bsub.add_parser("list")
+    b = bsub.add_parser("list", help="list backends with key fields (--json: full)")
     b.set_defaults(fn=c_backend_list)
+    b = bsub.add_parser("describe", help="dump one backend's full config")
+    b.add_argument("backend_id")
+    b.set_defaults(fn=c_backend_describe)
+    b = bsub.add_parser("priority",
+                        help="set a backend's scheduling priority (lower wins; "
+                             "live only, config reasserts on restart)")
+    b.add_argument("backend_id")
+    b.add_argument("priority", type=int, help=">= 1; 1 = first, 10 = default/lowest")
+    b.set_defaults(fn=c_backend_priority)
     for name in ("enable", "disable", "reserve", "release"):
         b = bsub.add_parser(name)
         b.add_argument("backend_id")
@@ -396,8 +457,9 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--thinking", action="store_true",
                    help="request reasoning effort upstream")
     b.add_argument("--concurrency", type=int, default=1)
-    b.add_argument("--priority", type=int, default=1,
-                   help="scheduling priority; higher is tried first (default 1)")
+    b.add_argument("--priority", type=int, default=10,
+                   help="scheduling priority; LOWER is tried first "
+                        "(default 10 = lowest)")
     b.add_argument("--group", default="", help="resource group id")
     b.add_argument("--notes", default="")
     b.set_defaults(fn=c_backend_add_salad)

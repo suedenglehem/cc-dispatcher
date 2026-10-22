@@ -15,8 +15,9 @@ model_id = "qwen3.8-27b"        # id the server reports
 model_label = "qwen3.8-27b"     # passed to `claude --model`
 concurrency = 1
 resource_group = "local"
-# priority = 1              # when several fit, higher is tried first (default 1);
-                            # equal priorities keep the profile's backend_ids order
+# priority = 1              # when several fit, LOWER is tried first (1 beats 2,
+                            # 3, ...; default 10 = lowest); equal priorities keep
+                            # the profile's backend_ids order
 # enabled = false               # exclude from scheduling
 # is_primary = true             # reserve for the coordinating session
 # manually_reserved = true      # exclude from worker jobs
@@ -55,10 +56,12 @@ Persistent immediately; no restart needed.
 
 ```sh
 ladd backend list
+ladd backend describe <id>     # dump one backend's full config (credentials redacted)
 ladd backend enable  <id>
 ladd backend disable <id>
 ladd backend reserve <id> --note "why"
 ladd backend release <id>
+ladd backend priority <id> N   # set scheduling priority (lower wins, 1..; 10 = default)
 ladd backend check   <id>      # force an immediate probe
 ladd workers --refresh
 ladd status
@@ -68,6 +71,8 @@ ladd status
 
 - **tr4**: `~/.config/local-dispatcher/config.toml`; restart with
   `systemctl --user restart local-dispatcher`.
-- **i7**: same paths and commands. Current backend `i7-local` →
-  `http://127.0.0.1:8080` (llama.cpp, alias `qwen3.8-27b`, running without
-  `--api-key`).
+- **i7**: same paths and commands. Backends (set 2026-10-22): `tr4-primary`
+  (tr4's vLLM over the LAN, `http://192.168.0.30:8091`) priority 1,
+  `i7-local` (local llama.cpp, `http://127.0.0.1:8080`, no `--api-key`)
+  priority 2, `tr4-secondary` (LAN `http://192.168.0.30:8080`) priority 3.
+  `ladd` is `~/.local/bin/ladd` (not on the non-interactive ssh PATH).
