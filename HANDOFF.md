@@ -205,6 +205,26 @@ agents do the reasoning.
   restarted with zero active jobs (all 7 jobs were blocked) → safe. Verified
   post-restart: `schema_version: 3`, `ladd workers` priorities
   {3, 1, 1, 2, 1} in JSON + text.
+- Propagated to i7 (2026-10-22): pushed 1bab661 to origin, `git pull --ff-only`
+  on i7's install (`/dd2/andrei/claude/dispatcher`, was at 6745ec0), daemon
+  restarted with zero jobs/reservations → schema v3, worker row shows
+  `priority`. Note: i7's venv has **no pytest** (deployment clone) — verified
+  via daemon behavior, not the suite; `ladd` there is `~/.local/bin/ladd` (not
+  on the non-interactive ssh PATH).
+- i7 live config extended (2026-10-22, `~/.config/local-dispatcher/config.toml`
+  ON I7; backup `config.toml.bak-2026-10-22`): added tr4's two servers as
+  cross-host backends — `tr4-primary` (vLLM, http://192.168.0.30:8091,
+  qwen3.8-27b-fp8) **priority 3**, `tr4-secondary` (strata
+  swift-1.5-iq3_xxs, label qwen, http://192.168.0.30:8080) **priority 1**;
+  `i7-local` raised to **priority 2**; `cc-worker` `backend_ids` now
+  `["tr4-primary", "i7-local", "tr4-secondary"]`. tr4's LAN IP = 192.168.0.30
+  (hostname b760one); both servers verified reachable from i7 keyless via
+  `curl /v1/models` BEFORE the config change. No new resource group (per-backend
+  concurrency 1 already caps each server at 1 job from i7). Validated with
+  `load_config`, restarted idle → all three online, priorities {3, 2, 1}.
+  User (2026-10-22): the two daemons never dispatch concurrently — only ONE
+  primary works on a job at a time, so tr4's vLLM won't actually see load from
+  both daemons; don't re-flag the combined-load question.
 
 ## Changed files (P5 — SaladCloud backends, 2026-10-19)
 - `local_dispatcher/salad_proxy.py` (NEW, vendored, stdlib-only) — local 127.0.0.1 proxy:
