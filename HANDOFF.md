@@ -103,12 +103,17 @@ agents do the reasoning.
   `test_i_salad.py` 12 integration cases, incl. a real worker job on a salad backend and
   the heartbeat on the real tick path).
 
-- P6 (backend priority): **complete (2026-10-22)** — `priority` per `[[backends]]`
-  (int ≥ 1, default 1). Semantics (user-specified): among free backends the
-  HIGHEST priority gets the job first; ties keep the profile's `backend_ids`
-  order; an explicit `backend_id` at submit still wins. Live config set:
-  tr4-primary 3, i7 2, tr4-secondary/ak/salad 1; daemon restarted (schema v3).
-  6 new unit tests; full suite re-run green.
+- P6 (backend priority): **complete (2026-10-22, inverted same day — P6b)** —
+  `priority` per `[[backends]]` (int ≥ 1). Semantics (user-specified, v2):
+  among free backends the LOWER number wins (1 beats 2, 3, ...); default
+  10 = baseline/lowest; ties keep the profile's `backend_ids` order; unknown
+  (stale) ids sort last instead of crashing the tick; an explicit
+  `backend_id` at submit still wins overall. Same-day additions: `ladd
+  backend list` one-line-per-backend table, `ladd backend describe <id>`
+  full-config dump (credentials redacted), `ladd backend priority <id> <N>`
+  (live only), spaces forbidden in backend ids at load. Live config (both
+  hosts, verified post-restart): tr4-primary 1, i7/i7-local 2, tr4-secondary
+  3, ak + salad at default 10. 7 unit tests; full suite 154 green.
 
 ## Worker death 143 (external SIGTERM) — SUSPENDED per user 2026-10-17
 - Symptom: 4 daemon-spawned workers on the OLD daemon (pid 16445) died exit 143 (SIGTERM, class=crash),
@@ -175,7 +180,56 @@ agents do the reasoning.
   `systemctl --user restart local-dispatcher`. Check freshness with
   `systemctl --user show local-dispatcher -p MainPID,ActiveEnterTimestampMonotonic` vs file mtimes.
 
-## Changed files (2026-10-22 — backend priority)
+## Changed files (2026-10-22 — priority inversion + backend list/describe/priority)
+- Semantics flipped per user request: `pick_backend` now sorts LOWER
+  `priority` first (1 beats 2, 3, ...; default 10 = baseline/lowest). Stable
+  sort — ties keep the profile's `backend_ids` order; unknown ids (stale
+  profile rows) sort last via a `float("inf")` key so a tick cannot crash.
+  The submit-pinned preferred id still wins overall.
+- `local_dispatcher/config.py` — `BackendConfig.priority` default 1→10;
+  `_validate` rejects spaces in backend ids ("id must not contain spaces").
+- `local_dispatcher/backends.py` — `pick_backend` ascending sort (was
+  descending); docstring updated.
+- `local_dispatcher/api.py` — `backend_set` (daemon handler) accepts optional
+  `priority` (None = keep current); persists + in-memory config lockstep +
+  event payload. `ApiClient.backend_set` passes it through;
+  `backend_add_salad` default priority 10. `local_dispatcher/models.py` —
+  `BackendSetParams.priority: int|None (ge=1)`,
+  `BackendAddSaladParams.priority` default 10.
+- `local_dispatcher/cli.py` — `ladd backend list` renders a one-line-per-
+  backend table (id, endpoint, model, priority, concurrency, group, health;
+  flags: salad/primary/disabled/reserved=note); `--json` unchanged. New
+  `ladd backend describe <id>` — full config dump, `credential_env` redacted
+  server-side, built over the existing list endpoint (no new daemon API).
+  New `ladd backend priority <id> <N>` — live only; prints the
+  "config file reasserts on daemon restart" caveat. `add-salad --priority`
+  default 10.
+- `local_dispatcher/salad.py` — `salad_block_text` writes `priority = N`
+  only when ≠ 10 (was ≠ 1).
+- `tests/test_u_backend_priority.py` (6→7) — rewritten for lower-wins: pick
+  order + fall-through, declared-order tie at default, preferred beats
+  priority, sync persistence, TOML default/explicit, `priority = 0`
+  rejected, NEW space-in-id rejected.
+- Docs: `BACKENDS.md` (lower-wins comment, `describe`/`priority` in live
+  toggles, i7 host bullet with new priorities), `config.example.toml`
+  (commented `ak` example), `PROGRESS.md` i7 bullet to new values,
+  `README.md` install step (clone + bash).
+- Live tr4 config (`~/.config/local-dispatcher/config.toml`): tr4-primary
+  3→1, tr4-secondary 1→3, i7 stays 2, `priority = 1` REMOVED from ak and the
+  tamarind salad block → both now default 10 (interpretation the user didn't
+  name — flagged for confirmation). `load_config` → [(tr4-primary,1),
+  (tr4-secondary,3),(ak,10),(i7,2),(salad,10)]; zero active jobs (7 blocked)
+  → restart → `ladd backend list` verified {1,3,2,10,10}.
+- Live i7 config (backup `config.toml.bak-2026-10-22-prio`): tr4-primary 3→1,
+  tr4-secondary 1→3, i7-local stays 2; `load_config` → [(tr4-primary,1),
+  (tr4-secondary,3),(i7-local,2)]; fully idle (no jobs/reservations) →
+  restart → all three online, priorities {1,2,3}.
+- Smoke on both daemons at fe2b7ff: `backend list` table, `describe` (i7,
+  ak, i7-local — full dump, redaction path), `priority` round-trip
+  (ak 10→5→10, i7-local 2→4→2, both restored).
+- Committed **fe2b7ff** + pushed; i7 fast-forwarded to it (was 1bab661).
+
+## Changed files (2026-10-22 — backend priority, P6a — superseded by P6b above)
 - Feature: `priority` (int ≥ 1, default 1) per `[[backends]]`. `pick_backend`
   tries the highest priority first among free backends (stable sort — ties keep
   the profile's `backend_ids` order); preferred/submit-pinned id stays first overall.
@@ -498,7 +552,8 @@ agents do the reasoning.
   backend-check workers path; adapters/claude.py `--verbose` + effort handling; api.py redaction + 8k cap
 
 ## Test results
-- pytest: **153 passed, 0 failed** (2026-10-22, incl. 6 new backend-priority tests)
+- pytest: **154 passed, 0 failed** (2026-10-22, incl. 7 backend-priority tests, post-inversion)
+- pytest: 153 passed, 0 failed (2026-10-22, P6a — 6 backend-priority tests, pre-inversion)
 - pytest: **129 passed, 0 skipped** (2026-10-19) — **20/20 acceptance tests green**
 - Acceptance a01–a20 (20): green — a10 with a REAL `dispatcherd` subprocess (~10s: two
   daemon lifetimes + SIGKILL mid-job); a14/a15/a16 with a REAL `mycelium serve` subprocess

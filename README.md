@@ -1,5 +1,24 @@
 # Local Coding Agent Dispatcher
 
+============================================================================
+
+You won't need this one if you're buying tokens on commercial connectors.
+I made this "dispatcher" to allow my claude code (cc) to maximize the use
+of my local llm's ressources, i have right hw bounds, vram a ram are not that 
+plenty, so, i run parallel=1 mostly, but i have 2x3090 + 3080ti on one machine, 
+the best is to run vllm (or sglang, which is faster, but vllm is more stable)
+on 2 3090ies and 3080ti can run flash next iq3xs 100Kctx via strata. and i have
+second box with 4080s+4060ti, these are good for running flash next iq3xs
+on 2 cards with 220k ctx at 60tps or iq4 at 30 tps. so, dispatcher allows 
+claude to run subasks on these strata backends. AND, i can add backends on
+either salad's cards or vast.ai cards. that's it. i could redefine claude's
+haiku, sonner, opus internal models to point them to different local llms,
+but dispatcher does the job fine and i can use it with paid services. once
+dispatcher is added to cc's mcp, just tell cc to run subtasks on dispatcher's
+backends using priorities 
+
+==============================================================================
+
 A small, deterministic local orchestration service for running **independent
 supporting coding tasks as supervised worker agents** while the primary
 session keeps working.
@@ -101,7 +120,7 @@ which encodes the verified TR4 topology). Sections:
 | `[worker]` | deadline/attempt defaults, `claude_executable` / `cline_executable` (default `ccline`), tool allowlist, env derivation (90% of probed context, output tokens, autocompact pct), `anthropic_api_key = "local"`, `permission_mode = "bypassPermissions"` |
 | `[mycelium]` | **optional** — the daemon spawns a `mycelium serve` child only if this section is present; absent ⇒ memory injection off |
 | `[[resource_groups]]` | total-concurrency caps across member backends |
-| `[[backends]]` | `endpoint`, `model_id` (served id), `model_label` (the `--model` label), `is_primary`, `enabled`, `manually_reserved`, `concurrency`, `resource_group`; salad backends add `kind = "salad"`, `salad_proxy_port`, `salad_keyfile`, … (managed by `ladd -a`, see below) |
+| `[[backends]]` | `endpoint`, `model_id` (served id), `model_label` (the `--model` label), `is_primary`, `enabled`, `manually_reserved`, `concurrency`, `resource_group`, `priority` (scheduling order — LOWER wins: 1 beats 2, 3, …; default 10 = lowest); salad backends add `kind = "salad"`, `salad_proxy_port`, `salad_keyfile`, … (managed by `ladd -a`, see below) |
 | `[[profiles]]` | per-profile adapter, extra args, `backend_ids`, deadlines, limits |
 | `[[projects]]` | `repo_path`, `integration_ref` (default `main`), `mycelium_project` — or add at runtime with `ladd project add` |
 
@@ -115,6 +134,19 @@ Release a backend for work only when its interactive client is closed:
 ladd backend release tr4-secondary      # when Cline is closed
 ladd backend reserve tr4-secondary --note "Cline interactive session"   # after
 ```
+
+Inspecting and reordering backends:
+
+```sh
+ladd backend list                       # one line per backend: priority, health, flags
+ladd backend describe tr4-secondary     # full config of one backend (credentials redacted)
+ladd backend priority ak 10             # runtime priority — LOWER wins (default 10);
+                                        # live only: the config file reasserts on restart
+```
+
+`priority` decides which free backend gets a job: the lowest number is
+tried first (1 before 2, 3, …), ties keep the profile's `backend_ids`
+order. `BACKENDS.md` is the full how-to for editing backends.
 
 **SaladCloud groups** are first-class backends: `ladd -a
 https://<group>.salad.cloud` registers a running (or even currently
